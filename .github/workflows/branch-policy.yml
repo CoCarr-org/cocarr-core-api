@@ -1,0 +1,62 @@
+name: Branch Policy
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  # Substitute for the branch_name_pattern ruleset, which GitHub does not offer
+  # for repository rulesets on user-owned repos. This is the only thing actually
+  # enforcing the naming convention, so it must stay.
+  validate-branch-name:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate head branch name
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if ! echo "$HEAD_REF" | grep -Eq '^(feature|release|hotfix|bugfix|support)/.+$'; then
+            echo "::error::Branch '$HEAD_REF' does not follow the naming convention."
+            echo "::error::Use feature/, release/, hotfix/, bugfix/ or support/ followed by a description."
+            exit 1
+          fi
+          echo "Branch name '$HEAD_REF' is compliant."
+
+  check-merge-direction:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR base branch matches Git Flow rules
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "Head branch: $HEAD_REF -> Base branch: $BASE_REF"
+          case "$HEAD_REF" in
+            feature/*)
+              if [ "$BASE_REF" != "develop" ]; then
+                echo "::error::feature/* branches must target 'develop', not '$BASE_REF'."
+                exit 1
+              fi
+              ;;
+            bugfix/*)
+              if [ "$BASE_REF" != "develop" ]; then
+                echo "::error::bugfix/* branches must target 'develop', not '$BASE_REF'."
+                exit 1
+              fi
+              ;;
+            release/*)
+              if [ "$BASE_REF" != "main" ] && [ "$BASE_REF" != "develop" ]; then
+                echo "::error::release/* branches must target 'main' or 'develop', not '$BASE_REF'."
+                exit 1
+              fi
+              ;;
+            hotfix/*)
+              if [ "$BASE_REF" != "main" ] && [ "$BASE_REF" != "develop" ]; then
+                echo "::error::hotfix/* branches must target 'main' or 'develop', not '$BASE_REF'."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "No merge-direction rule defined for '$HEAD_REF' — skipping."
+              ;;
+          esac

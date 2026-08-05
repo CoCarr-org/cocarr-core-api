@@ -38,3 +38,10 @@ prisma/*.db
 # Misc
 .cache/
 tmp/
+
+# --- COCARR-BACKEND specifics ---
+uploads/
+.codegpt
+# Firebase service-account keys — provided via env vars, never commit
+src/configs/admin-service-account.json
+src/configs/user-service-account.json

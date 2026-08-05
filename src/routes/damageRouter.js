@@ -1,0 +1,11 @@
+const express = require('express');
+const router = express.Router();
+const damageController = require('../controllers/damageController');
+const { authenticateUser, authenticateAdmin, authenticateUserOptional } = require('../middlewares/authMiddleware');
+const { body } = require('express-validator');
+router.post('/create',authenticateUser, damageController.createDamage);
+router.get('/:id',authenticateUser, damageController.getDamageById);
+router.put('/:id',authenticateUser, damageController.updateDamageStatus);
+router.get('/booking/:bookingId',authenticateUser, damageController.getDamagesByBooking);
+router.put('/payment/:id',authenticateUser, damageController.updateDamagePayment);
+module.exports = router;

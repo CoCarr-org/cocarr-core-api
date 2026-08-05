@@ -1,0 +1,18 @@
+
+/* ---- Car detail: offers in the booking panel ---- */
+.cd-offers { margin: 4px 0 14px; }
+.cd-offers-lbl { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--muted, #83838d); margin-bottom: 8px; }
+.cd-offer-list { display: flex; flex-direction: column; gap: 8px; }
+.cd-offer {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  text-align: left; padding: 10px 12px; border-radius: 10px;
+  background: var(--surface-2, #1d1d22); border: 1px dashed var(--line, rgba(255,255,255,.14)); cursor: pointer;
+}
+.cd-offer:hover { border-color: var(--gold, #EDBF31); }
+.cd-offer.applied { border-style: solid; border-color: rgba(63,206,143,.4); background: rgba(63,206,143,.1); cursor: default; }
+.cd-offer div { display: flex; flex-direction: column; min-width: 0; }
+.cd-offer strong { font-size: 13px; }
+.cd-offer .muted { font-size: 11.5px; }
+.cd-offer-apply { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; color: var(--gold, #EDBF31); white-space: nowrap; }
+.cd-discount { color: #6ee6b0; }
+.cd-discount span { color: #6ee6b0 !important; }
