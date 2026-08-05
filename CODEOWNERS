@@ -1,0 +1,8 @@
+# CODEOWNERS — default reviewers for this repository
+# Every change requires review from the platform team.
+
+*       @CoCarr-org/platform-team
+
+# Category owners
+/.github/   @CoCarr-org/devops-team
+/docs/      @CoCarr-org/platform-team
