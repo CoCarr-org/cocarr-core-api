@@ -7,7 +7,11 @@ Part of the **Cocarr Enterprise Platform** ([CoCarr-org](https://github.com/CoCa
 Topics: `operations`, `booking`, `inventory`, `platform`
 
 ## Purpose
-The core platform API: operations, booking lifecycle and inventory.
+The core platform API and system of record for the Cocarr car-sharing business:
+bookings, hosts, vehicles, payments, payouts, wallet, memberships, referrals and
+KYC — plus the platform's RBAC/IAM layer (teams, levels, per-screen permissions,
+`resolveAccess` / `requirePermission`). Migrated unchanged from the original
+`COCARR-BACKEND`; business logic is preserved, not rewritten.
 
 ## Architecture
 This repository is one component of the Cocarr platform, a service-oriented
@@ -19,16 +23,27 @@ for the full platform architecture and Architecture Decision Records.
 ## Technology Stack
 - Node.js
 - Express
-- Prisma
-- Jest
+- Sequelize ORM (MySQL, `dialect: 'mysql'`)
+- Firebase Admin (Auth verification — separate user and admin projects)
+- Razorpay (payments), Cashfree (Aadhaar e-KYC), SendGrid (email)
+- S3-compatible object storage (Tigris) via a private image proxy
+- Jest (tests — to be added)
 
 ## Folder Structure
 ```
-src/     # Operations, booking and inventory modules
-docs/    # Domain and API documentation
-tests/   # Unit and integration tests
-.github/ # Issue/PR templates, workflows, CODEOWNERS
+index.js      # Entry point; mounts src/routes/rootRouter.js at /v1
+src/          # controllers, services, models, routes, middlewares, utils, configs
+models/       # Sequelize model definitions (top-level)
+migrations/   # Sequelize migrations
+config/       # Runtime configuration
+scripts/      # Operational and migration scripts
+docs/         # Domain documentation (e.g. ADMIN_TEAMS_RBAC.md)
+seed.js       # Database seed
+.github/      # Issue/PR templates, workflows (ci + branch-policy), CODEOWNERS
 ```
+
+> See `CLAUDE.md` in this repo for the full operational detail carried over from
+> `COCARR-BACKEND` (RBAC model, panel binding, KYC flow, payment signatures, etc.).
 
 ## Getting Started
 ```bash
