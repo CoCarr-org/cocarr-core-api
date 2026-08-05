@@ -28,6 +28,18 @@ const ADMIN_MODULE_LIST = [
   { key: 'security',     label: 'Security',           description: 'Sessions, IP whitelist, MFA, API keys.',       built: true },
   { key: 'systemHealth', label: 'System Health',      description: 'Jobs, queues, webhooks, logs.',                built: true },
   { key: 'integrations', label: 'Integrations',       description: 'Payment, Firebase, Maps, Email, SMS.',         built: true },
+
+  // ── Workspace product modules ──
+  // The Workspace domain (cocarr-workspace-api) is a separate service, but the
+  // platform's IAM is central (charter): its modules are registered here so
+  // they can be granted to a Workspace team via Roles & Permissions, and so the
+  // web panel's nav gating (which reads this grid via /admin/me) governs them
+  // like every other module. The DATA for these screens is served by
+  // workspace-api; only the ACCESS decision lives here.
+  { key: 'employees',    label: 'Employees',          description: 'Workspace: employee records and lifecycle.',   built: true },
+  { key: 'orgStructure', label: 'Organization',       description: 'Workspace: departments, designations, teams.', built: true },
+  { key: 'recruitment',  label: 'Recruitment',        description: 'Workspace: candidate hiring pipeline.',        built: true },
+  { key: 'accessRequests', label: 'Access Requests',  description: 'Workspace: additional-access workflow.',       built: true },
 ];
 
 const ADMIN_MODULES = ADMIN_MODULE_LIST.map((m) => m.key);
