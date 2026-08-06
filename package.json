@@ -38,7 +38,7 @@
     "sequelize": "^6.37.8",
     "sharp": "^0.35.0",
     "uniqid": "^5.4.0",
-    "uuid": "^9.0.1",
+    "uuid": "^14.0.0",
     "winston": "^3.11.0"
   },
   "devDependencies": {
