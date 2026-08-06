@@ -1,8 +1,27 @@
-# CODEOWNERS — default reviewers for this repository
-# Every change requires review from the platform team.
+# Managed by RepoGuard. Local edits are overwritten on the next `repo enforce`.
+#
+# Every line maps a path pattern to the accounts or teams that must review
+# changes to it. The last matching pattern wins, so put the most specific
+# patterns at the bottom.
+#
+# For an organisation-owned repository, replace the owner below with a team
+# (`@org/team-name`): teams survive people changing roles, individuals do not.
+#
+# Reference: https://docs.github.com/articles/about-code-owners
 
-*       @CoCarr-org/platform-team
+# Default owner for everything in the repository.
+*       @CoCarr-org/engineering
 
-# Category owners
-/.github/   @CoCarr-org/devops-team
-/docs/      @CoCarr-org/platform-team
+# Build, CI and automation.
+/.github/           @CoCarr-org/engineering
+/Makefile           @CoCarr-org/engineering
+/scripts/           @CoCarr-org/engineering
+
+# Dependency manifests: changes here affect the whole supply chain.
+/go.mod             @CoCarr-org/engineering
+/go.sum             @CoCarr-org/engineering
+/package.json       @CoCarr-org/engineering
+/package-lock.json  @CoCarr-org/engineering
+/requirements.txt   @CoCarr-org/engineering
+/Gemfile            @CoCarr-org/engineering
+/pom.xml            @CoCarr-org/engineering
