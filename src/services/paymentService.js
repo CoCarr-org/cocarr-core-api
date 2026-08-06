@@ -1,13 +1,15 @@
 const { Op } = require('sequelize');
-const Razorpay = require('razorpay');
 const { TRANSACTION_TYPE_BOOKING } = require('../configs/constants');
 const { validatePaymentVerification } = require('razorpay/dist/utils/razorpay-utils');
 const Transaction = require('../models/transaction');
 
-var RazorpayInstance = new Razorpay({
-  key_id: process.env.PG_KEY,
-  key_secret: process.env.PG_SEC,
-});
+// The SHARED lazy client (helper/payment.js), not a second one built here.
+//
+// This file used to construct its own `new Razorpay({...})` at module scope — a
+// duplicate of the helper, and the second reason a missing PG_KEY took the whole
+// API down rather than just disabling payments. Two copies also means two places
+// to change when the credentials move.
+const RazorpayInstance = require('../helper/payment');
 
 async function createPaymentOrder(data,type) {
   console.log('data',data)
