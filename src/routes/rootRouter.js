@@ -6,6 +6,10 @@ const router = express.Router()
 console.log('path',path.join(__dirname, '..', '..', 'uploads'))
 router.use('/uploads', express.static(path.join(__dirname, '..', '..', 'uploads')));
 
+// Liveness — no auth, no upstream calls. The gateway's /health/services deep
+// check pings this on every service.
+router.get('/health', require('../controllers/healthController').health);
+
 router.use('/image', require('./imageRouter'));
 router.use('/damage', require('./damageRouter'));
 // Public admin auth (forgot-password) — no auth middleware. First so the
