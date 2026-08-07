@@ -40,12 +40,19 @@ const onlyArg = args.find((a) => a.startsWith('--only='));
 const ONLY = onlyArg ? onlyArg.split('=')[1].split(',').map((s) => s.trim()) : null;
 
 // Parents before children.
+//
+// `referral_campaigns` is here because referrals carry a campaignId FK. It was
+// missing on the first run, and INSERT IGNORE turned the resulting foreign-key
+// failures into silence: both referral rows vanished while the script reported
+// success. A parent table left out of this list does not error — it quietly
+// loses its children, which is the worst way for a migration to be wrong.
 const TABLES = [
   'users',
   'kycDocuments',
   'panCards',
   'drivingLicences',
   'wallets',
+  'referral_campaigns',
   'referrals',
   'wallettransactions',
 ];
@@ -82,6 +89,18 @@ const bindable = (v) => {
   return v;
 };
 
+// The primary key, so a row that failed to insert can be looked up afterwards
+// and classified as duplicate or rejected. A table with a composite or absent
+// PK simply skips that classification rather than guessing.
+const primaryKeyOf = async (conn, schema, table) => {
+  const [rows] = await conn.execute(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema=? AND table_name=? AND column_key='PRI'",
+    [schema, table],
+  );
+  if (rows.length !== 1) return null;
+  return rows[0].column_name ?? rows[0].COLUMN_NAME;
+};
+
 const tableExists = async (conn, schema, table) => {
   const [rows] = await conn.execute(
     'SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema=? AND table_name=?',
@@ -113,7 +132,7 @@ const tableExists = async (conn, schema, table) => {
   console.log(`source: ${process.env.LEGACY_DB_HOST}/${srcSchema}`);
   console.log(`target: ${process.env.DB_HOST}/${dstSchema}\n`);
 
-  const totals = { copied: 0, skipped: 0, tables: 0 };
+  const totals = { copied: 0, skipped: 0, rejected: 0, tables: 0 };
 
   for (const table of TABLES) {
     if (ONLY && !ONLY.includes(table)) continue;
@@ -128,6 +147,7 @@ const tableExists = async (conn, schema, table) => {
     const droppedFromSource = sCols.filter((c) => !dCols.includes(c));
     const onlyInTarget = dCols.filter((c) => !sCols.includes(c));
 
+    const pk = await primaryKeyOf(dst, dstSchema, table);
     const [rows] = await src.query(`SELECT ${shared.map((c) => `\`${c}\``).join(', ')} FROM \`${table}\``);
     const [[{ n: already }]] = await dst.query(`SELECT COUNT(*) AS n FROM \`${table}\``);
 
@@ -157,17 +177,56 @@ const tableExists = async (conn, schema, table) => {
       );
       inserted += res.affectedRows;
     }
-    const skipped = rows.length - inserted;
-    console.log(`    inserted=${inserted} alreadyPresent=${skipped}`);
-    totals.copied += inserted; totals.skipped += skipped; totals.tables++;
+
+    // A row that did not insert is NOT necessarily a duplicate. INSERT IGNORE
+    // downgrades foreign-key violations to warnings and drops the row, so
+    // reporting every miss as "alreadyPresent" hides real data loss — exactly
+    // what happened to `referrals` on the first run: 2 in source, 0 in target,
+    // 0 inserted, reported as though they were already there.
+    //
+    // So the misses are checked individually: a source id now present in the
+    // target was a duplicate; one still absent was REJECTED. The second is
+    // reported loudly, because silence is how a migration lies.
+    const notInserted = rows.length - inserted;
+    let duplicates = 0;
+    let rejectedIds = [];
+    if (notInserted > 0 && pk) {
+      const ids = rows.map((r) => r[pk]);
+      const [present] = await dst.query(
+        `SELECT \`${pk}\` AS id FROM \`${table}\` WHERE \`${pk}\` IN (${ids.map(() => '?').join(',')})`,
+        ids,
+      );
+      const presentIds = new Set(present.map((r) => String(r.id)));
+      duplicates = ids.filter((i) => presentIds.has(String(i))).length - inserted;
+      rejectedIds = ids.filter((i) => !presentIds.has(String(i)));
+    }
+
+    console.log(`    inserted=${inserted} alreadyPresent=${Math.max(0, duplicates)} rejected=${rejectedIds.length}`);
+    if (rejectedIds.length) {
+      console.log(`    !! ${rejectedIds.length} row(s) REJECTED and NOT migrated: ${rejectedIds.slice(0, 5).join(', ')}`
+        + (rejectedIds.length > 5 ? ' …' : ''));
+      console.log('       Usually a foreign key whose parent table is missing from TABLES above.');
+      totals.rejected += rejectedIds.length;
+    }
+    totals.copied += inserted;
+    totals.skipped += Math.max(0, duplicates);
+    totals.tables++;
     /* eslint-enable no-await-in-loop */
   }
 
   console.log('\n---');
-  console.log(`tables=${totals.tables} rowsInserted=${totals.copied} rowsAlreadyPresent=${totals.skipped}`);
+  console.log(`tables=${totals.tables} rowsInserted=${totals.copied} rowsAlreadyPresent=${totals.skipped} rowsREJECTED=${totals.rejected}`);
+  if (totals.rejected > 0) {
+    console.log('\n!! Some rows were rejected and are NOT in the target. Fix the cause and re-run.');
+    // Nothing here; the exit code is set at the end. Setting process.exitCode
+    // here would be silently overridden by the explicit process.exit() below.
+  }
   if (DRY) console.log('DRY RUN complete — re-run with --confirm to apply.');
 
   await src.end();
   await dst.end();
-  process.exit(0);
+  // NON-ZERO WHEN ROWS WERE REJECTED. Run as a pre-deploy hook, exit 0 is what
+  // Railway reads as "the migration worked" — so exiting 0 after losing rows
+  // would turn data loss into a green deploy.
+  process.exit(totals.rejected > 0 ? 1 : 0);
 })().catch((e) => { console.error('MIGRATION FAILED:', e.message); process.exit(1); });
