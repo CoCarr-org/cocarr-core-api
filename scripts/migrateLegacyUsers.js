@@ -47,13 +47,37 @@ const ONLY = onlyArg ? onlyArg.split('=')[1].split(',').map((s) => s.trim()) : n
 // success. A parent table left out of this list does not error — it quietly
 // loses its children, which is the worst way for a migration to be wrong.
 const TABLES = [
+  // ── configuration and master data ────────────────────────────────────────
+  // First, and not only because they have no dependencies: without cities
+  // nothing is bookable and without the fee settings every fee reads as zero,
+  // so a database with users and no configuration looks healthy and behaves
+  // like a broken product.
+  'cities',
+  'brands',
+  'models',
+  'settings',
+  'platformSettings',
+  'protectionplans',
+  'membershiptypes',
+  'vehicleplans',
+  'offers',
+
+  // ── people ───────────────────────────────────────────────────────────────
   'users',
   'kycDocuments',
   'panCards',
   'drivingLicences',
+  'hosts',
+  'hostCommissions',
+
+  // ── wallet and referrals ─────────────────────────────────────────────────
+  // referral_campaigns before referrals (campaignId FK), and every referral
+  // parent before wallettransactions, which points back at all of it.
   'wallets',
   'referral_campaigns',
+  'referral_codes',
   'referrals',
+  'referral_rewards',
   'wallettransactions',
 ];
 
