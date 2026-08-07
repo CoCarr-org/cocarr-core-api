@@ -65,6 +65,22 @@ const columnsOf = async (conn, schema, table) => {
   return rows.map((r) => r.column_name ?? r.COLUMN_NAME);
 };
 
+// JSON columns come back from the driver as JS OBJECTS, and mysql2 expands a
+// plain object in a placeholder into `key = value` pairs — its shorthand for
+// building a SET clause. Bound into an INSERT that produces broken SQL, which is
+// exactly how this failed the first time it met `users.nameMatchResult`:
+//
+//   ... `mismatches` = , `comparisons` = '[o' ...
+//
+// Dates and Buffers are objects too and the driver handles both correctly, so
+// they must NOT be stringified — only plain objects and arrays.
+const bindable = (v) => {
+  if (v === null || v === undefined) return v;
+  if (v instanceof Date || Buffer.isBuffer(v)) return v;
+  if (typeof v === 'object') return JSON.stringify(v);
+  return v;
+};
+
 const tableExists = async (conn, schema, table) => {
   const [rows] = await conn.execute(
     'SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema=? AND table_name=?',
@@ -133,7 +149,7 @@ const tableExists = async (conn, schema, table) => {
     const CHUNK = 200;
     for (let i = 0; i < rows.length; i += CHUNK) {
       const chunk = rows.slice(i, i + CHUNK);
-      const values = chunk.flatMap((r) => shared.map((c) => r[c]));
+      const values = chunk.flatMap((r) => shared.map((c) => bindable(r[c])));
       const [res] = await dst.query(
         `INSERT IGNORE INTO \`${table}\` (${shared.map((c) => `\`${c}\``).join(', ')}) VALUES ${chunk.map(() => placeholders).join(', ')}`,
         values,
