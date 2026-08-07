@@ -125,6 +125,31 @@ const primaryKeyOf = async (conn, schema, table) => {
   return rows[0].column_name ?? rows[0].COLUMN_NAME;
 };
 
+// The NON-primary unique indexes, so a row that did not insert can be told
+// apart properly. INSERT IGNORE swallows two very different failures — a
+// foreign key with no parent, and a clash on a natural unique key — and they
+// need opposite responses: the first is data loss to fix, the second is usually
+// "the destination already seeded this row" and is fine.
+//
+// Without this the script blamed a foreign key for all 23 platformSettings
+// rows, which are simply the defaults core seeds at boot under the same
+// (group, key). That would have sent somebody hunting a missing parent table
+// that does not exist.
+const uniqueKeysOf = async (conn, schema, table) => {
+  const [rows] = await conn.query(
+    `SELECT INDEX_NAME, COLUMN_NAME FROM information_schema.statistics
+     WHERE table_schema=? AND table_name=? AND NON_UNIQUE=0 AND INDEX_NAME<>'PRIMARY'
+     ORDER BY INDEX_NAME, SEQ_IN_INDEX`,
+    [schema, table],
+  );
+  const by = {};
+  rows.forEach((r) => {
+    const n = r.INDEX_NAME ?? r.index_name;
+    (by[n] = by[n] || []).push(r.COLUMN_NAME ?? r.column_name);
+  });
+  return Object.values(by);
+};
+
 const tableExists = async (conn, schema, table) => {
   const [rows] = await conn.execute(
     'SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema=? AND table_name=?',
@@ -225,15 +250,50 @@ const tableExists = async (conn, schema, table) => {
       rejectedIds = ids.filter((i) => !presentIds.has(String(i)));
     }
 
-    console.log(`    inserted=${inserted} alreadyPresent=${Math.max(0, duplicates)} rejected=${rejectedIds.length}`);
+    // Of the rows whose id is absent, separate the two causes. A clash on a
+    // natural unique key means the destination already holds that row under a
+    // different id — normal when the service seeds its own defaults, and not
+    // data loss. Only what is left is a genuine rejection.
+    let uniqueClashes = 0;
+    if (rejectedIds.length) {
+      const uniques = await uniqueKeysOf(dst, dstSchema, table);
+      const usable = uniques.filter((cols) => cols.every((c) => shared.includes(c)));
+      if (usable.length) {
+        const byId = new Map(rows.map((r) => [String(r[pk]), r]));
+        const stillMissing = [];
+        for (const id of rejectedIds) {
+          const row = byId.get(String(id));
+          let clashed = false;
+          for (const cols of usable) {
+            const where = cols.map((c) => `\`${c}\` <=> ?`).join(' AND ');
+            // eslint-disable-next-line no-await-in-loop
+            const [[hit]] = await dst.query(
+              `SELECT COUNT(*) AS n FROM \`${table}\` WHERE ${where}`,
+              cols.map((c) => bindable(row?.[c])),
+            );
+            if (Number(hit.n) > 0) { clashed = true; break; }
+          }
+          if (clashed) uniqueClashes++; else stillMissing.push(id);
+        }
+        rejectedIds = stillMissing;
+      }
+    }
+
+    console.log(`    inserted=${inserted} alreadyPresent=${Math.max(0, duplicates)}`
+      + `${uniqueClashes ? ` sameUniqueKey=${uniqueClashes}` : ''} rejected=${rejectedIds.length}`);
+    if (uniqueClashes) {
+      console.log(`    (${uniqueClashes} row(s) already exist under a different id — matched on a unique key. `
+        + 'Left as they are; this script never overwrites the destination.)');
+    }
     if (rejectedIds.length) {
       console.log(`    !! ${rejectedIds.length} row(s) REJECTED and NOT migrated: ${rejectedIds.slice(0, 5).join(', ')}`
         + (rejectedIds.length > 5 ? ' …' : ''));
-      console.log('       Usually a foreign key whose parent table is missing from TABLES above.');
+      console.log('       Not a unique-key clash, so most likely a foreign key whose parent '
+        + 'table is missing from TABLES above.');
       totals.rejected += rejectedIds.length;
     }
     totals.copied += inserted;
-    totals.skipped += Math.max(0, duplicates);
+    totals.skipped += Math.max(0, duplicates) + uniqueClashes;
     totals.tables++;
     /* eslint-enable no-await-in-loop */
   }
