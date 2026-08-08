@@ -20,6 +20,17 @@ const STORAGE_FOLDERS = [
   'vehicle',    // Car listing photos
   'profile',    // Profile pictures
   'ride',       // Start/end ride photos (odometer, fuel, damage)
+  // Candidate CVs from the careers site. Written and read by
+  // cocarr-workspace-api, NOT by this service — it is listed here only so
+  // extractKey treats `resume/<uuid>` as a foldered key rather than stripping
+  // the prefix and returning a uuid that resolves to nothing.
+  //
+  // ⚠ The gateway REFUSES this prefix on the public image proxy
+  // (see core.routes.ts). Résumés are personal data and are served only through
+  // the authenticated workspace route. Do not add it to the clients' photoUrl()
+  // folder lists: nothing on web, mobile or admin renders a CV, and listing it
+  // there would only help build a URL the gateway is going to reject.
+  'resume',
   'misc',       // Anything that doesn't declare a folder
 ];
 
