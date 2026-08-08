@@ -1,0 +1,34 @@
+# Deploy to Railway on push to develop.
+#
+# Railway's native "deploy on push" was not firing for these repos, so CI drives
+# it explicitly: the push updates develop, then this job tells Railway to pull
+# develop and redeploy the service(s) from source.
+#
+# Requires a RAILWAY_TOKEN secret — a Railway PROJECT token scoped to the
+# development environment (Railway -> project -> Settings -> Tokens). Until that
+# secret exists the job SKIPS (stays green), so it never spams failing builds.
+name: Deploy develop -> Railway
+on:
+  push:
+    branches: [develop]
+concurrency:
+  group: railway-deploy-develop
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Redeploy service(s) from latest develop
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "RAILWAY_TOKEN not set — skipping deploy (add the secret to enable auto-deploy)."
+            exit 0
+          fi
+          npm i -g @railway/cli
+          for svc in core; do
+            echo "::group::redeploy $svc"
+            railway redeploy --service "$svc" --yes --from-source
+            echo "::endgroup::"
+          done
