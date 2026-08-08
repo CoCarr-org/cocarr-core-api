@@ -227,6 +227,7 @@ function projectVehicleRc(rc) {
   return {
     vehicleRcNumber: rc?.rcNumber ?? null,
     vehicleRcImage: rc?.imageKey ?? null,
+    vehicleRcBackImage: rc?.backImageKey ?? null,
     vehicleRcVerified: rc ? rc.status === 'verified' : false,
     rcVerified: rc?.providerStatus === 'VERIFIED',
     rcVerificationId: rc?.verificationId ?? null,
