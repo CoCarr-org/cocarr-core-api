@@ -9,6 +9,7 @@ const City = require('../models/city');
 const Schedule = require('../models/schedule');
 const VehiclePhysicalVerification = require('../models/vehiclePhysicalVerification');
 const FeatureFlag = require('../models/featureFlag');
+const HostPayoutAccount = require('../models/hostPayoutAccount');
 const documentStore = require('./documentStoreService');
 const { logActivity } = require('./activityLogService');
 const { toPublicUrl, extractKey } = require('../utils/publicUrl');
@@ -100,12 +101,19 @@ async function getForReview(vehicleId) {
   const vehicle = await loadVehicle(vehicleId);
   const hostUserId = hostUserIdOf(vehicle);
 
-  const [rcDoc, panDoc, physicalRow, physicalRequired, live] = await Promise.all([
+  const [rcDoc, panDoc, physicalRow, physicalRequired, live, bank] = await Promise.all([
     documentStore.getCurrent('rc', vehicle.id),
     hostUserId ? documentStore.getCurrent('pan', hostUserId) : Promise.resolve(null),
     getPhysicalRow(vehicle.id),
     isPhysicalVerificationEnabled(),
     computeLive(vehicle),
+    // The payout account belongs to the HOST, not the vehicle, but the reviewer
+    // needs it on this screen: an approved car whose host cannot be paid is a
+    // booking waiting to become a support ticket. Keyed by hostId (the Host row
+    // id), not the user id — payouts resolve accounts by host.
+    vehicle.host?.id
+      ? HostPayoutAccount.findOne({ where: { hostId: vehicle.host.id, isActive: true } })
+      : Promise.resolve(null),
   ]);
 
   const hostUser = vehicle.host?.user || null;
@@ -118,6 +126,14 @@ async function getForReview(vehicleId) {
   if (!panDoc) outstanding.push('Host PAN (not submitted)');
   else if (panDoc.status !== 'verified') outstanding.push(`Host PAN (${panDoc.status})`);
   if (hostVerificationStatus !== 'active') outstanding.push(`Host identity (${hostVerificationStatus})`);
+  // ADVISORY, not blocking. Approve does not gate on the bank account — the
+  // backend's approve() has never required it, and adding a new blocker here
+  // would silently change which vehicles can go live. Surfaced so the reviewer
+  // sees it; `outstandingAdvisory` is kept separate from `outstanding` so
+  // readyToApprove is unaffected.
+  const outstandingAdvisory = [];
+  if (!bank) outstandingAdvisory.push('Host payout account (not added)');
+  else if (!bank.isVerified && !bank.isManuallyVerified) outstandingAdvisory.push('Host payout account (unverified)');
   if (physicalRequired && !physicalItemsVerified(physicalRow)) {
     const pending = VehiclePhysicalVerification.ITEMS
       .filter((item) => (physicalRow?.[`${item}Status`] || 'pending') !== 'verified')
@@ -135,11 +151,15 @@ async function getForReview(vehicleId) {
       host: hostUser
         ? { userId: hostUserId, name: hostUser.name, verificationStatus: hostVerificationStatus }
         : null,
+      // accountNumber only ever holds the last 4 digits by design, so this is
+      // safe to return whole.
+      bank: bank ? bank.toJSON() : null,
       // Keys are stored; URLs are what a client can put in an <img src>.
       physical: projectPhysical(physicalRow),
       physicalRequired,
       physicalItems: VehiclePhysicalVerification.ITEMS,
       outstanding,
+      outstandingAdvisory,
       readyToApprove:
         vehicle.approvalStatus === 'pending'
         && !outstanding.length,
