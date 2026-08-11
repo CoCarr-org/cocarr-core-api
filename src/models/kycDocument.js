@@ -53,6 +53,18 @@ const KycDocument = db.define('kycDocument', {
   ocrFields: { type: DataTypes.JSON },
   ocrRaw: { type: DataTypes.JSON },
   ocrCheckedAt: { type: DataTypes.DATE },
+
+  // ── What OCR read off the BACK of the Aadhaar ────────────────────────────
+  // Aadhaar is a two-faced document: the front carries the number/name/DOB and
+  // the back carries the ADDRESS. The front columns above are read from
+  // `imageKey`; these are read from `backImageKey`, kept separate so a back read
+  // never overwrites the front's number (the two are OCR'd independently, and
+  // the back rarely carries a number at all). Mirrors the front shape.
+  backOcrStatus: { type: DataTypes.STRING },    // VALID | INVALID | UNCHECKED | FAILED
+  backOcrVerificationId: { type: DataTypes.STRING },
+  backOcrFields: { type: DataTypes.JSON },
+  backOcrRaw: { type: DataTypes.JSON },
+  backOcrCheckedAt: { type: DataTypes.DATE },
   // Set when OCR could not read the document and the user explicitly agreed to
   // manual verification instead. Without this the submission does not proceed —
   // it is a consent record, so it stores WHEN as well as whether.

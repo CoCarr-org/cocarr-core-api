@@ -1,4 +1,5 @@
 const { Op } = require('sequelize');
+const axios = require('axios');
 const documentStore = require('./documentStoreService');
 const ocrService = require('./documentOcrService');
 const imageService = require('./imageService');
@@ -28,9 +29,50 @@ const badRequest = (m) => httpError(m, 400);
 // that is advisory everywhere in this codebase.
 const AADHAAR_RE = /^\d{12}$/;
 const LICENCE_RE = /^[A-Z]{2}[0-9]{2}[0-9A-Z]{10,12}$/;
+const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
 const normaliseAadhaar = (v) => String(v || '').replace(/[\s-]/g, '');
 const normaliseLicence = (v) => String(v || '').toUpperCase().replace(/[\s-]/g, '');
+const normalisePan = (v) => String(v || '').toUpperCase().replace(/\s/g, '');
+
+// Ask Cashfree to verify a PAN against the registry. ADVISORY only — the verdict
+// is recorded and shown to the reviewer, never used to reject, exactly like
+// userService.updatePanInfo (kept in step with it so both PAN paths behave
+// identically). Never throws: an outage stores UNCHECKED and onboarding
+// continues to manual review.
+async function verifyPanWithProvider(pan, name) {
+  const out = {};
+  if (!pan || !process.env.KYC_URL || !process.env.KYC_ID || !process.env.KYC_SECRET) return out;
+  try {
+    const res = await axios.post(`${process.env.KYC_URL}/verification/pan`, {
+      pan,
+      name: name || '',
+    }, {
+      headers: {
+        'x-client-id': `${process.env.KYC_ID}`,
+        'x-client-secret': `${process.env.KYC_SECRET}`,
+      },
+      timeout: 15000,
+    });
+    const provider = res.data || {};
+    out.providerStatus = provider.status || (String(provider.valid) === 'false' ? 'INVALID' : 'VALID');
+    out.providerName = provider.registered_name || null;
+    out.providerCheckedAt = new Date();
+    if (provider.registered_name && name) {
+      const { compareNames } = require('./nameMatchService');
+      const match = compareNames(name, provider.registered_name);
+      out.nameMatch = match.matched;
+      out.nameMismatchReason = match.matched ? null : match.reason;
+    }
+  } catch (error) {
+    // UNCHECKED is deliberately distinct from INVALID — "we never got an answer"
+    // is not "the provider says this is fake".
+    console.error('[pan-verify] provider call failed:', error.message);
+    out.providerStatus = 'UNCHECKED';
+    out.providerCheckedAt = new Date();
+  }
+  return out;
+}
 
 // Stores a base64 / data-URI image and returns its object key.
 const storeImage = async (image, folder) => {
@@ -114,9 +156,19 @@ async function scanAadhaar(userId, body = {}) {
   if (!body.backImage) throw badRequest('Upload the back of your Aadhaar card');
 
   const front = bufferOf(body.frontImage);
-  const ocr = front
-    ? await ocrService.runOcr('aadhaar', front.buffer, front.mimeType)
-    : { status: 'UNCHECKED', fields: {}, raw: null, verificationId: null, message: 'No image to read' };
+  const back = bufferOf(body.backImage);
+  // Both faces are read. The front carries the number/name/DOB; the back carries
+  // the ADDRESS, which is what the profile address is checked against — so the
+  // back is no longer stored blind. The two reads are independent and stored in
+  // separate columns so a back read can never overwrite the front's number.
+  const [ocr, backOcr] = await Promise.all([
+    front
+      ? ocrService.runOcr('aadhaar', front.buffer, front.mimeType)
+      : { status: 'UNCHECKED', fields: {}, raw: null, verificationId: null, message: 'No image to read' },
+    back
+      ? ocrService.runOcr('aadhaar', back.buffer, back.mimeType)
+      : { status: 'UNCHECKED', fields: {}, raw: null, verificationId: null, message: 'No image to read' },
+  ]);
 
   const [imageKey, backImageKey] = await Promise.all([
     storeImage(body.frontImage, 'kyc'),
@@ -136,6 +188,12 @@ async function scanAadhaar(userId, body = {}) {
     ocrCheckedAt: new Date(),
     providerStatus: ocr.status,
     providerCheckedAt: new Date(),
+    // The back reading, in its own columns.
+    backOcrStatus: backOcr.status,
+    backOcrVerificationId: backOcr.verificationId,
+    backOcrFields: backOcr.fields,
+    backOcrRaw: backOcr.raw,
+    backOcrCheckedAt: new Date(),
   };
   // Only what OCR actually read. A failed read must not blank values a previous
   // scan found, so nulls are never written over existing data.
@@ -147,7 +205,11 @@ async function scanAadhaar(userId, body = {}) {
   if (ocr.fields.holderName) fields.holderName = ocr.fields.holderName;
   if (ocr.fields.dateOfBirth) fields.dateOfBirth = ocr.fields.dateOfBirth;
   if (ocr.fields.gender) fields.gender = ocr.fields.gender;
-  if (ocr.fields.address) fields.address = ocr.fields.address;
+  // Address preference: the front rarely carries it, so the BACK is the primary
+  // source and the front is only a fallback. Neither overwrites a stored value
+  // with a null.
+  if (backOcr.fields.address) fields.address = backOcr.fields.address;
+  else if (ocr.fields.address) fields.address = ocr.fields.address;
 
   const existing = await documentStore.getCurrent('kyc', userId);
 
@@ -515,6 +577,173 @@ async function confirmLicenceNumber(userId, body = {}) {
   };
 }
 
+// ── PAN: step 1, read the card ─────────────────────────────────────────────
+//
+// The PAN counterpart of scanAadhaar/scanLicence, and captured BOTH FACES like
+// them. The number and the printed name are on the front, so that is the only
+// face OCR reads — but the back is what a reviewer needs to judge a card that
+// has been tampered with or laminated over, and capturing one face here while
+// Aadhaar and the licence take two was an inconsistency the host felt.
+//
+// The images are stored FIRST so a failed read can be retried against them, the
+// front is OCR'd for the number and the printed name, and when the number
+// cannot be read `confirmPanNumber` collects it.
+//
+// The back is REQUIRED on this path, matching scanLicence. It is nullable on the
+// row because rows written before the column existed have a front and nothing
+// else; `PUT /user/update-pan` (the standalone PAN screens) is a separate,
+// single-faced path and is deliberately left alone.
+//
+// PAN belongs to the user (the host in the listing flow), one row per
+// submission, exactly like the other documents. `providerStatus` on the row is
+// the PAN-REGISTRY verdict and is written by `confirmPanNumber`; this step only
+// touches the OCR columns, so a re-scan never clobbers a registry answer.
+async function scanPan(userId, body = {}) {
+  const image = body.frontImage || body.image;
+
+  // Consent-only call: OCR could not read the card and the user chose a manual
+  // check over another retry. The scan is already stored — nothing to re-upload.
+  if (!image && body.manualConsent === true) {
+    const stored = await documentStore.getCurrent('pan', userId);
+    if (!stored?.imageKey) throw badRequest('Upload a photo of your PAN card first');
+    await documentStore.update('pan', stored, {
+      manualConsent: true,
+      manualConsentAt: stored.manualConsentAt || new Date(),
+    });
+    return {
+      ocrStatus: stored.ocrStatus || null,
+      panNumber: null,
+      holderName: stored.holderName || null,
+      needsManualEntry: !stored.panNumber,
+      manualVerification: true,
+      message: null,
+    };
+  }
+
+  if (!image) throw badRequest('Upload the front of your PAN card');
+  if (!body.backImage) throw badRequest('Upload the back of your PAN card');
+
+  const front = bufferOf(image);
+  const ocr = front
+    ? await ocrService.runOcr('pan', front.buffer, front.mimeType)
+    : { status: 'UNCHECKED', fields: {}, raw: null, verificationId: null, message: 'No image to read' };
+
+  const [imageKey, backImageKey] = await Promise.all([
+    storeImage(image, 'pan'),
+    storeImage(body.backImage, 'pan'),
+  ]);
+
+  const ocrNumber = normalisePan(ocr.fields.panNumber);
+  const readNumber = PAN_RE.test(ocrNumber) ? ocrNumber : null;
+
+  const fields = {
+    imageKey,
+    backImageKey,
+    ocrStatus: ocr.status,
+    ocrVerificationId: ocr.verificationId,
+    ocrFields: ocr.fields,
+    ocrRaw: ocr.raw,
+    ocrCheckedAt: new Date(),
+  };
+  // Only what OCR actually read — a failed read must not blank a value an
+  // earlier scan found.
+  if (readNumber) fields.panNumber = readNumber;
+  // A retry that finally reads cleanly withdraws the earlier manual-check
+  // request.
+  if (readNumber) { fields.manualConsent = false; fields.manualConsentAt = null; }
+  if (ocr.fields.holderName) fields.holderName = ocr.fields.holderName;
+
+  const existing = await documentStore.getCurrent('pan', userId);
+
+  // Re-scanning a row an admin has already decided on starts a NEW submission,
+  // so their verdict is not silently attached to a card they never saw.
+  if (!existing || existing.status === 'verified' || existing.status === 'rejected') {
+    await documentStore.submit('pan', userId, {
+      ...fields,
+      panNumber: fields.panNumber || existing?.panNumber || null,
+      holderName: fields.holderName || existing?.holderName || null,
+    });
+  } else {
+    await documentStore.update('pan', existing, fields);
+  }
+
+  return {
+    ocrStatus: ocr.status,
+    panNumber: readNumber,
+    holderName: ocr.fields.holderName || null,
+    needsManualEntry: !readNumber,
+    manualVerification: !readNumber && !!existing?.manualConsent,
+    message: readNumber ? null : (ocr.message || 'We could not read your PAN card automatically.'),
+  };
+}
+
+// ── PAN: step 2, confirm the number ────────────────────────────────────────
+// The counterpart of `confirmLicenceNumber`. Reached when OCR could not read
+// the PAN, or when the user edits the name the card is registered under. It
+// settles the number and holder name, then asks the registry (advisory) so the
+// review queue carries a provider verdict — the one extra thing PAN does over
+// the other documents, because a PAN registry lookup is cheap and useful.
+async function confirmPanNumber(userId, body = {}) {
+  const typedName = String(body.panName || '').trim();
+  const typed = normalisePan(body.panNumber);
+  if (body.panNumber !== undefined && body.panNumber !== '' && !PAN_RE.test(typed)) {
+    throw badRequest('Enter a valid PAN — ten characters, like ABCDE1234F');
+  }
+
+  const doc = await documentStore.getCurrent('pan', userId);
+  if (!doc?.imageKey) {
+    const err = badRequest('Upload a photo of your PAN card before entering the number');
+    err.needsScan = true;
+    throw err;
+  }
+  if (doc.status === 'verified') throw badRequest('Your PAN is already verified');
+  if (doc.status === 'rejected') {
+    const err = badRequest('This PAN was rejected. Upload the card again to resubmit.');
+    err.needsScan = true;
+    throw err;
+  }
+
+  const readNumber = normalisePan(doc.ocrFields?.panNumber);
+  const ocrRead = PAN_RE.test(readNumber);
+
+  const number = typed || (ocrRead ? readNumber : '');
+  if (!PAN_RE.test(number)) throw badRequest('Enter a valid PAN — ten characters, like ABCDE1234F');
+
+  // OCR read a number and the user typed a different one — a mismatch to flag,
+  // the same rule the Aadhaar confirm applies.
+  if (ocrRead && typed && readNumber !== number) {
+    throw badRequest(
+      'That number does not match the PAN card you uploaded. Check the number, '
+      + 'or go back and upload the right card.',
+    );
+  }
+
+  const holderName = typedName || doc.holderName || null;
+  // Typed because OCR could not read the card, so a human has to look at it.
+  const manual = !ocrRead;
+
+  const provider = await verifyPanWithProvider(number, holderName || '');
+
+  await documentStore.update('pan', doc, {
+    panNumber: number,
+    ...(holderName ? { holderName } : {}),
+    ...provider,
+    ...(manual
+      ? { manualConsent: true, manualConsentAt: doc.manualConsentAt || new Date() }
+      : {}),
+  });
+
+  return {
+    // Masked on the way out, like the other confirm calls.
+    panNumber: `••••••${number.slice(-4)}`,
+    source: ocrRead ? 'document' : 'entered',
+    manualVerification: manual,
+    holderName: holderName || null,
+    providerStatus: provider.providerStatus || null,
+    nameMatch: provider.nameMatch ?? null,
+  };
+}
+
 // ── Retrying OCR on a document already uploaded ────────────────────────────
 //
 // The point of this endpoint is that a failed read does NOT cost the user their
@@ -525,14 +754,27 @@ async function confirmLicenceNumber(userId, body = {}) {
 //
 // Re-reads the STORED scan, so it works even in a session that no longer holds
 // the images. Never touches the admin's `status`.
-async function retryDocumentOcr(userId, kind) {
-  if (!['aadhaar', 'licence'].includes(kind)) {
-    throw badRequest(`Cannot retry OCR for "${kind}"`);
-  }
+// Per-kind wiring so the three scanned documents share one retry path. `refresh`
+// is false for PAN because PAN is a payout document and is deliberately not part
+// of onboarding readiness() — reading it must not nudge the profile workflow.
+const SCANNED_KINDS = {
+  aadhaar: { type: 'kyc',     imageField: 'imageKey',      numberField: 'documentNumber', normalise: normaliseAadhaar, pattern: AADHAAR_RE, out: 'aadhaarNumber', refresh: true },
+  licence: { type: 'licence', imageField: 'frontImageKey', numberField: 'licenceNumber',  normalise: normaliseLicence, pattern: LICENCE_RE, out: 'licenceNumber', refresh: true },
+  pan:     { type: 'pan',     imageField: 'imageKey',      numberField: 'panNumber',      normalise: normalisePan,     pattern: PAN_RE,     out: 'panNumber',     refresh: false },
+  // The BACK of the Aadhaar — the address side. Re-read on demand from the admin
+  // review screen. Uses the `aadhaar` provider document-type but writes the
+  // result to the row's `backOcr*` columns (see `reRunOcr`), so it never touches
+  // the front's number/name. Not a client "retry-ocr" target — `back: true` and
+  // `refresh: false` keep it out of the number-recording path.
+  'aadhaar-back': { type: 'kyc', imageField: 'backImageKey', ocrKind: 'aadhaar', back: true, refresh: false },
+};
 
-  const type = kind === 'aadhaar' ? 'kyc' : 'licence';
-  const doc = await documentStore.getCurrent(type, userId);
-  const key = kind === 'aadhaar' ? doc?.imageKey : doc?.frontImageKey;
+async function retryDocumentOcr(userId, kind) {
+  const spec = SCANNED_KINDS[kind];
+  if (!spec) throw badRequest(`Cannot retry OCR for "${kind}"`);
+
+  const doc = await documentStore.getCurrent(spec.type, userId);
+  const key = doc?.[spec.imageField];
   if (!key) {
     const err = badRequest('Upload your document first');
     err.needsScan = true;
@@ -543,26 +785,25 @@ async function retryDocumentOcr(userId, kind) {
   // re-run so both produce identical results from identical input.
   const result = await reRunOcr(userId, kind);
 
-  const fresh = await documentStore.getCurrent(type, userId);
-  const numberField = kind === 'aadhaar' ? 'documentNumber' : 'licenceNumber';
-  const normalise = kind === 'aadhaar' ? normaliseAadhaar : normaliseLicence;
-  const pattern = kind === 'aadhaar' ? AADHAAR_RE : LICENCE_RE;
-
-  const read = normalise(
-    kind === 'aadhaar' ? result.fields?.documentNumber : result.fields?.licenceNumber,
-  );
-  const readNumber = pattern.test(read) ? read : null;
+  // `reRunOcr` has written the OCR columns onto the row; read the extracted
+  // number back from the reloaded document. (The previous code read a `fields`
+  // key off `reRunOcr`'s return, which it never had — so a successful retry
+  // silently never recorded the number. Reading `ocrFields` fixes that for all
+  // three kinds.)
+  const fresh = await documentStore.getCurrent(spec.type, userId);
+  const read = spec.normalise(fresh?.ocrFields?.[spec.numberField]);
+  const readNumber = spec.pattern.test(read) ? read : null;
 
   // The read succeeded this time. Record the number and withdraw the manual
   // check the earlier failure prompted — nobody needs to eyeball a card the
   // machine has now read.
   if (readNumber) {
-    await documentStore.update(type, fresh, {
-      [numberField]: readNumber,
+    await documentStore.update(spec.type, fresh, {
+      [spec.numberField]: readNumber,
       manualConsent: false,
       manualConsentAt: null,
     });
-    await userVerification.refreshAfterDocument(userId);
+    if (spec.refresh) await userVerification.refreshAfterDocument(userId);
   }
 
   return {
@@ -570,8 +811,8 @@ async function retryDocumentOcr(userId, kind) {
     ocrStatus: result.status,
     // The owner's own document, same as the scan response. Masked everywhere
     // it is read back later.
-    [kind === 'aadhaar' ? 'aadhaarNumber' : 'licenceNumber']: readNumber,
-    holderName: result.fields?.holderName || null,
+    [spec.out]: readNumber,
+    holderName: result.holderName || null,
     needsManualEntry: !readNumber,
     message: readNumber
       ? null
@@ -685,15 +926,16 @@ async function submitSelfie(userId, body = {}) {
 //
 // Never overwrites the admin's `status` — only the OCR columns.
 async function reRunOcr(userId, kind) {
-  if (!['aadhaar', 'licence'].includes(kind)) {
-    throw badRequest(`Cannot OCR "${kind}" — only aadhaar and licence are scanned documents`);
+  const spec = SCANNED_KINDS[kind];
+  if (!spec) {
+    throw badRequest(`Cannot OCR "${kind}" — only aadhaar, licence and pan are scanned documents`);
   }
 
-  const type = kind === 'aadhaar' ? 'kyc' : 'licence';
+  const { type } = spec;
   const doc = await documentStore.getCurrent(type, userId);
   if (!doc) throw httpError(`This user has no ${kind} on file`, 404);
 
-  const key = kind === 'aadhaar' ? doc.imageKey : doc.frontImageKey;
+  const key = doc[spec.imageField];
   if (!key) throw badRequest('There is no scan stored for this document');
 
   // The stored value may be a full proxy URL; the bucket wants the bare key.
@@ -712,7 +954,32 @@ async function reRunOcr(userId, kind) {
     throw httpError('Could not read the stored document image', 502);
   }
 
-  const ocr = await ocrService.runOcr(kind, buffer, mimeType);
+  const ocr = await ocrService.runOcr(spec.ocrKind || kind, buffer, mimeType);
+
+  // The Aadhaar back is read into its OWN columns and merges only the address —
+  // it must not touch the front's number/name/DOB or the front-facing
+  // providerStatus. Handled and returned early so the front logic below stays
+  // exactly as it was.
+  if (spec.back) {
+    const backPatch = {
+      backOcrStatus: ocr.status,
+      backOcrVerificationId: ocr.verificationId,
+      backOcrFields: ocr.fields,
+      backOcrRaw: ocr.raw,
+      backOcrCheckedAt: new Date(),
+    };
+    // The back's whole purpose is the address; fill it in when the front never
+    // carried one, but never overwrite a stored value with a null.
+    if (ocr.fields.address && !doc.address) backPatch.address = ocr.fields.address;
+    await doc.update(backPatch);
+    return {
+      kind,
+      status: ocr.status,
+      message: ocr.message,
+      read: !!(ocr.fields && ocr.fields.address),
+      checkedAt: backPatch.backOcrCheckedAt,
+    };
+  }
 
   const patch = {
     ocrStatus: ocr.status,
@@ -732,11 +999,14 @@ async function reRunOcr(userId, kind) {
     merge('dateOfBirth', ocr.fields.dateOfBirth);
     merge('gender', ocr.fields.gender);
     merge('address', ocr.fields.address);
-  } else {
+  } else if (kind === 'licence') {
     merge('holderName', ocr.fields.holderName);
     merge('dateOfBirth', ocr.fields.dateOfBirth);
     merge('issuedDate', ocr.fields.issuedDate);
     merge('expiryDate', ocr.fields.expiryDate);
+  } else {
+    // PAN carries only a name besides the number.
+    merge('holderName', ocr.fields.holderName);
   }
 
   await doc.update(patch);
@@ -755,7 +1025,7 @@ async function reRunOcr(userId, kind) {
     message: ocr.message,
     // Enough for the UI to refresh in place rather than telling the admin to
     // reload, without restating the document's contents.
-    read: !!(ocr.fields && (ocr.fields.documentNumber || ocr.fields.licenceNumber)),
+    read: !!(ocr.fields && (ocr.fields.documentNumber || ocr.fields.licenceNumber || ocr.fields.panNumber)),
     holderName: ocr.fields?.holderName || null,
     checkedAt: patch.ocrCheckedAt,
   };
@@ -764,6 +1034,7 @@ async function reRunOcr(userId, kind) {
 module.exports = {
   scanAadhaar, confirmAadhaarNumber,
   scanLicence, confirmLicenceNumber,
+  scanPan, confirmPanNumber,
   retryDocumentOcr,
   submitAadhaar, submitLicence, submitSelfie, reRunOcr,
 };

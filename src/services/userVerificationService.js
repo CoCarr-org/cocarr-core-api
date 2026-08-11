@@ -4,6 +4,7 @@ const { matchAgainstProfile } = require('./nameMatchService');
 const { logActivity } = require('./activityLogService');
 const documentStore = require('./documentStoreService');
 const referralService = require('./referralService');
+const walletService = require('./walletService');
 
 // User onboarding / KYC verification workflow (PRD: Signup & KYC).
 //
@@ -414,6 +415,9 @@ async function getStatus(userId) {
         submitted: !!pan?.panNumber, verified: pan?.status === 'verified',
         status: pan?.status || null, rejectionReason: pan?.rejectionReason || null,
         imageKey: pan?.imageKey || null,
+        // The back carries nothing we extract, but it is half of what a
+        // reviewer is looking at. Null on rows captured before both faces.
+        backImageKey: pan?.backImageKey || null,
         holderName: pan?.holderName || null,
         providerStatus: pan?.providerStatus || null,
         ocr: buildOcrView(pan),
@@ -698,6 +702,18 @@ async function approve(userId, admin) {
   // already verified. PAN is deliberately not part of this check: it is a
   // payout prerequisite reviewed on its own, not part of the identity check.
 
+  // Every ACTIVE user gets a wallet — their points account, one row per user
+  // (unique id, keyed by userId). It is created here rather than lazily on the
+  // first credit so a newly approved user with no referral still has an account
+  // to view. `createWallet` is idempotent (returns the existing row) and this is
+  // best-effort: a wallet hiccup must never block the access decision, exactly
+  // like the referral release below.
+  try {
+    await walletService.createWallet(userId, displayName(user));
+  } catch (err) {
+    console.log('[wallet] ensure on activation skipped:', err?.message);
+  }
+
   await releaseReferralOnActivation(userId);
 
   await logActivity({
@@ -789,8 +805,19 @@ async function getForReview(userId) {
   // comes back through the `ocr` summary below, with the number masked.
   const shape = (doc, extra = {}) => {
     if (!doc) return null;
-    const { ocrRaw, ocrFields, ...rest } = doc.toJSON();
-    return { ...rest, ocrRawStored: !!ocrRaw, ...extra };
+    // `backOcrRaw`/`backOcrFields` are stripped for the same reason as the front
+    // pair: the raw provider payload can repeat regulated identifiers in
+    // plaintext. Everything the reviewer needs comes back through the masked
+    // `ocrBack` summary below.
+    const {
+      ocrRaw, ocrFields, backOcrRaw, backOcrFields, ...rest
+    } = doc.toJSON();
+    return {
+      ...rest,
+      ocrRawStored: !!ocrRaw,
+      backOcrRawStored: !!backOcrRaw,
+      ...extra,
+    };
   };
 
   // What OCR read, compared against what the user typed and what is on the
@@ -865,6 +892,35 @@ async function getForReview(userId) {
     };
   };
 
+  // The BACK of the Aadhaar reads into its own columns, so it gets its own
+  // masked summary. There is no number to match on the back — its whole value is
+  // the address (and occasionally the name) — so the number/name-match markers
+  // are omitted and the address leads.
+  const ocrBackSummary = (doc) => {
+    if (!doc || !doc.backOcrStatus) return null;
+    const f = doc.backOcrFields || {};
+    return {
+      status: doc.backOcrStatus || null,
+      checkedAt: doc.backOcrCheckedAt || null,
+      nameMatchesProfile: f.holderName ? compare(f.holderName, profileName) : null,
+      extracted: {
+        holderName: f.holderName || null,
+        address: f.address || null,
+      },
+      allFields: flattenFields(doc.backOcrRaw?.document_fields || doc.backOcrRaw?.documentFields, 'drop'),
+      payload: buildPayloadSections(doc.backOcrRaw),
+      photo: extractOcrPhoto(doc.backOcrRaw?.document_fields || doc.backOcrRaw?.documentFields),
+      additional: Object.entries(f)
+        .filter(([k]) => !NAMED_OCR_FIELDS.has(k))
+        .reduce((acc, [k, v]) => {
+          if (v === null || v === undefined || v === '') return acc;
+          if (typeof v === 'object') return acc;
+          acc[k] = looksLikeAadhaar(v) ? mask(String(v)) : v;
+          return acc;
+        }, {}),
+    };
+  };
+
   return {
     user: user.toJSON(),
     nameMatch: await buildNameMatch(user),
@@ -874,6 +930,8 @@ async function getForReview(userId) {
         // Shown in full by product decision (previously masked).
         documentNumber: kyc?.documentNumber || null,
         ocr: ocrSummary(kyc, 'documentNumber', 'documentNumber'),
+        // The address side. Null until the back has been read at least once.
+        ocrBack: ocrBackSummary(kyc),
       }),
       pan: shape(pan, { panNumber: pan?.panNumber || null }),
     },

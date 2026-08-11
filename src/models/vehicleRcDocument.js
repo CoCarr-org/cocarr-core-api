@@ -11,7 +11,12 @@ const VehicleRcDocument = db.define('vehicleRcDocument', {
   vehicleId: { type: DataTypes.UUID, allowNull: false },
 
   rcNumber: { type: DataTypes.STRING },
+  // Front face — the one OCR reads the details off. `backImageKey` holds the
+  // reverse of the card, captured for the record but not OCR'd. Added on boot
+  // by db.sync({alter:true}); nullable so pre-existing single-image rows are
+  // unaffected.
   imageKey: { type: DataTypes.STRING },
+  backImageKey: { type: DataTypes.STRING },
 
   // Captured FROM the RC record, never typed by the host — held for dispute
   // and audit purposes.

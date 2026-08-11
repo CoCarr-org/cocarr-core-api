@@ -31,8 +31,33 @@ const pickEnv = (...names) => {
   return undefined;
 };
 
-const getBucketName = () =>
-  pickEnv('S3_BUCKET', 'BUCKET_NAME', 'AWS_BUCKET', 'STORAGE_BUCKET') || 'wrapped-lockerbox-9ybz-nh';
+// THE BUCKET NAME IS REQUIRED, and deliberately has no default any more.
+//
+// It used to fall back to the literal `wrapped-lockerbox-9ybz-nh` — the bucket
+// living in the LEGACY Railway project. Once that project is retired the bucket
+// goes with it, so the fallback would point every unconfigured deployment at
+// storage that no longer exists. A default that silently reads the wrong bucket
+// is worse than a refusal: images 404 one at a time, which reads as missing
+// data rather than as missing configuration.
+//
+// `AWS_S3_BUCKET_NAME` is FIRST because that is the name Railway's own Tigris
+// bucket injects when you attach one. The previous list did not include it, so
+// attaching a bucket supplied working credentials and a bucket name nothing
+// read — the one combination that looks configured and is not.
+const BUCKET_VARS = [
+  'AWS_S3_BUCKET_NAME', 'S3_BUCKET', 'BUCKET_NAME', 'AWS_BUCKET', 'STORAGE_BUCKET',
+];
+
+const getBucketName = () => {
+  const bucket = pickEnv(...BUCKET_VARS);
+  if (!bucket) {
+    throw new Error(
+      `Object storage bucket is not configured. Set one of ${BUCKET_VARS.join(', ')} `
+      + 'on this service. Attaching a Railway bucket sets AWS_S3_BUCKET_NAME for you.',
+    );
+  }
+  return bucket;
+};
 
 // Credentials must be passed explicitly: the AWS SDK's default provider chain
 // only reads AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, so S3-compatible providers
@@ -56,8 +81,14 @@ const buildS3Client = () => {
   }
 
   return new S3Client({
-    region: pickEnv('AWS_REGION', 'S3_REGION', 'BUCKET_REGION') || 'auto',
-    endpoint: pickEnv('S3_ENDPOINT', 'BUCKET_ENDPOINT', 'AWS_ENDPOINT_URL_S3') || 'https://t3.storageapi.dev',
+    // Railway's Tigris bucket injects AWS_DEFAULT_REGION and AWS_ENDPOINT_URL;
+    // neither was read before, so an attached bucket silently used 'auto' and
+    // the hardcoded Tigris endpoint. That happened to work while the bucket was
+    // the legacy Tigris one and will not once it is a different provider.
+    region: pickEnv('AWS_REGION', 'AWS_DEFAULT_REGION', 'S3_REGION', 'BUCKET_REGION') || 'auto',
+    endpoint: pickEnv(
+      'S3_ENDPOINT', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL', 'BUCKET_ENDPOINT',
+    ) || 'https://t3.storageapi.dev',
     // Most S3-compatible providers require path-style addressing.
     forcePathStyle: true,
     credentials: { accessKeyId, secretAccessKey },
