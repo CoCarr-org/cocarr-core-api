@@ -80,7 +80,6 @@ const { initializePayoutScheduler } = require('./src/utils/payoutScheduler.js');
 const { initializeSettlementScheduler } = require('./src/utils/settlementScheduler.js');
 const { initializeRefundScheduler } = require('./src/utils/refundScheduler.js');
 
-const indexRouter = require('./src/routes/rootRouter.js');
 const db = require('./src/configs/db.js');
 const bodyParser = require('body-parser');
 const { errorHandlerMiddleware } = require('./src/middlewares/error.js');
@@ -114,20 +113,45 @@ process.on('uncaughtException', (err) => {
 // Classify the connection BEFORE sync. `Unknown database 'cocarr_core'` is a
 // completely different problem from a partial alter-sync, and reporting it as
 // the latter sends whoever reads the log looking for a bad model. Never throws.
+const { mountVersions } = require('./src/routes/apiVersions');
 const { preflight } = require('./src/configs/dbPreflight');
 
+const { status: migrationStatus } = require('./src/db/migrator');
+
+// THE SERVICE NO LONGER CHANGES THE SCHEMA. Migrations do, as a release step
+// (`npm run migrate:up`), before the new revision takes traffic.
+//
+// This is the largest schema on the platform — 75 tables, 64 foreign keys — and
+// the one with the most to lose. db.sync({alter:true}) rewrote every one of them
+// on every boot: dropping any column no longer declared on a model, aborting the
+// whole pass on one bad foreign key (leaving every later model with no table),
+// and accumulating indexes toward MySQL's 64-key limit. All three have caused
+// incidents here.
+//
+// Boot now only REPORTS drift, and `dbReady` still gates the seeding steps below
+// so they never race an unmigrated schema. Development can use DB_SYNC=true.
 const dbReady = preflight(db, console)
-  .then(({ ok }) => {
-    // Skip the sync when the database is unreachable: it can only produce a
-    // noisier version of the error already reported.
-    if (!ok) return Promise.reject(new Error('database unreachable'));
-    return db.sync({alter:true}).then(() => console.log('Schema sync done.'));
+  .then(async ({ ok }) => {
+    if (!ok) return; // already reported, in detail, by the preflight
+
+    if (process.env.DB_SYNC === 'true' && process.env.NODE_ENV !== 'production') {
+      console.warn('DB_SYNC=true — using db.sync({alter:true}). Development only; never in production.');
+      await db.sync({ alter: true });
+      console.log('Schema sync done (DB_SYNC).');
+      return;
+    }
+
+    const { executed, pending } = await migrationStatus();
+    if (pending.length) {
+      console.error('!!! PENDING MIGRATIONS — THIS REVISION IS RUNNING AGAINST AN OLD SCHEMA !!!');
+      console.error(`  pending (${pending.length}): ${pending.join(', ')}`);
+      console.error('  Run `npm run migrate:up` as a release step BEFORE this revision takes traffic.');
+      return;
+    }
+    console.log(`Schema up to date — ${executed.length} migration(s) applied.`);
   })
   .catch((err) => {
-    if (err.message === 'database unreachable') return; // already reported above
-    console.error('!!! SCHEMA SYNC FAILED — tables may be missing !!!');
-    console.error(err?.parent?.sqlMessage || err?.message || err);
-    console.error('Run `node scripts/syncNewTables.js` to create missing tables without a full alter.');
+    console.error(`Could not determine migration status: ${err?.parent?.sqlMessage || err?.message || err}`);
   });
 
 // Each step is independent: a failure in one must not skip the others.
@@ -248,7 +272,9 @@ if (CORS_ORIGINS.length === 0) {
 // that reads like a server error.
 app.use(bodyParser.json({ limit: '12mb' }));
 app.use(bodyParser.urlencoded({ limit: '12mb', extended: true }));
-app.use('/v1', indexRouter);
+// Every supported API version is mounted from one registry, which also emits
+// the Deprecation/Sunset headers and serves GET /versions.
+mountVersions(app, { log: console });
 app.use(errorHandlerMiddleware);
 
 // Start the server
