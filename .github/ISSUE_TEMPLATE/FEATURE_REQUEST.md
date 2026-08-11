@@ -1,19 +1,39 @@
 ---
 name: Feature request
-about: Suggest an idea or enhancement
-title: "[Feature]: "
-labels: ["enhancement"]
-assignees: []
+about: Propose a new capability or an improvement to an existing one
+title: "feat: "
+labels: feature
+assignees: ""
 ---
 
-## Problem Statement
-What problem does this solve? Who is affected?
+<!-- Managed by RepoGuard. Local edits are overwritten on the next `repo enforce`. -->
 
-## Proposed Solution
-Describe the solution you would like.
+## Problem
 
-## Alternatives Considered
-Other approaches you evaluated.
+<!-- What problem does this solve, and for whom? Describe the situation, not the
+     solution. -->
 
-## Additional Context
-Mockups, references or related work.
+## Proposed solution
+
+<!-- What should the product do? -->
+
+## Alternatives considered
+
+<!-- Other approaches, and why they were not chosen. -->
+
+## Scope
+
+- [ ] User-facing change
+- [ ] API change
+- [ ] Database change
+- [ ] Breaking change
+
+## Acceptance criteria
+
+- [ ]
+- [ ]
+- [ ]
+
+## Additional context
+
+<!-- Mockups, links, prior art, related issues. -->

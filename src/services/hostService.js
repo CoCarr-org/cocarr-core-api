@@ -457,7 +457,7 @@ const endBooking = async (bookingId, data) => {
   }
 };
 
-const createVehicle = async ({step,vehicleNumber,brandId,cityId,vehicleName,model,userId,description,images,vehicleId:vehicleIdParam,lat,long,address,name,preferences,vehiclePlan:vehiclePlandata}) => {
+const createVehicle = async ({step,vehicleNumber,brandId,cityId,vehicleName,model,userId,description,images,vehicleId:vehicleIdParam,lat,long,address,name,preferences,vehiclePlan:vehiclePlandata,rcImageUrl,rcBackImageUrl}) => {
   const transaction = await db.transaction();
   try {
     let vehicle;
@@ -544,6 +544,8 @@ const createVehicle = async ({step,vehicleNumber,brandId,cityId,vehicleName,mode
       await VehicleRcDocument.create({
         vehicleId: vehicle.id,
         rcNumber: rc?.vehicle_number || normalizeVehicleNumber(vehicleNumber) || null,
+        imageKey: rcImageUrl || null,
+        backImageKey: rcBackImageUrl || null,
         ownerName: rc?.owner_name || null,
         makerModel: rc?.maker_model || null,
         makerDescription: rc?.maker_description || null,
@@ -700,6 +702,7 @@ const createVehicleListing = async ({
   engineNumber,
   chassisNumber,
   rcImageUrl,
+  rcBackImageUrl,
   ownerName,
   maker,
   color,
@@ -835,6 +838,7 @@ const createVehicleListing = async ({
       vehicleId: vehicle.id,
       rcNumber: rc?.vehicle_number || number || null,
       imageKey: rcImageUrl || null,
+      backImageKey: rcBackImageUrl || null,
       ownerName: rc?.owner_name || null,
       makerModel: rc?.maker_model || null,
       makerDescription: rc?.maker_description || maker || null,

@@ -47,12 +47,21 @@ const DOCUMENT_TYPE_CANDIDATES = {
   // British spelling first: Cashfree's own product pages call it a "Driving
   // Licence", and `DRIVING_LICENSE` is the value already known to be rejected.
   licence: ['DRIVING_LICENCE', 'DL', 'DRIVING_LICENSE'],
+  // PAN card during host onboarding. No confirmed token, so the plain value
+  // leads and the underscored/joined variants follow, tried only on an explicit
+  // document_type_invalid — same probing contract as the other kinds.
+  pan: ['PAN', 'PAN_CARD', 'PANCARD'],
 };
 
 const ENV_OVERRIDE = {
   aadhaar: 'KYC_OCR_TYPE_AADHAAR',
   licence: 'KYC_OCR_TYPE_LICENCE',
+  pan: 'KYC_OCR_TYPE_PAN',
 };
+
+// Human labels for the INVALID message, so "that does not look like a valid …"
+// reads correctly per kind.
+const KIND_LABELS = { aadhaar: 'Aadhaar card', licence: 'driving licence', pan: 'PAN card' };
 
 // Remembers the value the provider accepted, per kind, for this process.
 const acceptedType = {};
@@ -137,12 +146,19 @@ const extractLicence = (f) => ({
   address: pick(f, 'address', 'full_address'),
 });
 
-const EXTRACTORS = { aadhaar: extractAadhaar, licence: extractLicence };
+const extractPan = (f) => ({
+  panNumber: pick(f, 'pan', 'pan_number', 'id_number', 'document_number'),
+  holderName: pick(f, 'name', 'name_on_card', 'full_name'),
+  dateOfBirth: toIsoDate(pick(f, 'dob', 'date_of_birth')),
+  fatherName: pick(f, 'father_name', 'fathers_name'),
+});
+
+const EXTRACTORS = { aadhaar: extractAadhaar, licence: extractLicence, pan: extractPan };
 
 /**
  * Runs one document image through OCR.
  *
- * @param {'aadhaar'|'licence'} kind
+ * @param {'aadhaar'|'licence'|'pan'} kind
  * @param {Buffer} fileBuffer
  * @param {string} mimeType
  * @returns {Promise<{status, fields, raw, verificationId, message}>}
@@ -264,7 +280,7 @@ async function runOcr(kind, fileBuffer, mimeType) {
   if (providerStatus && providerStatus !== 'VALID') {
     return {
       status: 'INVALID', fields, raw: data, verificationId: id,
-      message: `That does not look like a valid ${kind === 'aadhaar' ? 'Aadhaar card' : 'driving licence'}.`,
+      message: `That does not look like a valid ${KIND_LABELS[kind] || 'document'}.`,
     };
   }
 
