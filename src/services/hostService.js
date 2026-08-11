@@ -62,15 +62,42 @@ const createHost = async (hostData) => {
   }
 };
 
+// Sortable columns, so a client cannot put arbitrary text into ORDER BY.
+const HOST_SORTABLE = ['createdAt', 'updatedAt', 'name', 'email', 'contactNumber', 'status'];
+
 const getAllHosts = async ({sort,offset=0,limit=10,filter,search}) => {
   try {
-    let order;
-    if (sort.startsWith('-')) {
-      order = [[sort.substring(1), 'DESC']];
-    } else {
-      order = [[sort, 'ASC']];
+    // `sort` was read straight off req.query and dereferenced — so ANY caller
+    // omitting it got `Cannot read properties of undefined (reading
+    // 'startsWith')`, surfaced as a bare 400. The ops list happens to always
+    // send one, which is why this survived. Default, and refuse a column that
+    // is not sortable rather than interpolating it into ORDER BY.
+    const requested = String(sort || '-createdAt');
+    const direction = requested.startsWith('-') ? 'DESC' : 'ASC';
+    const column = requested.replace(/^-/, '');
+    const order = [[HOST_SORTABLE.includes(column) ? column : 'createdAt', direction]];
+
+    // `search` USED TO DO NOTHING. It was passed to findAndCountAll as
+    // `search:`, which Sequelize does not understand and silently ignores — so
+    // the ops search box filtered nothing and quietly returned page 1 of
+    // everything. Hosts carry their own denormalised name/email/contactNumber,
+    // so the match is a plain OR across those three.
+    const term = String(search || '').trim();
+    const where = { ...(filter || {}) };
+    if (term) {
+      where[Op.or] = [
+        { name: { [Op.like]: `%${term}%` } },
+        { email: { [Op.like]: `%${term}%` } },
+        { contactNumber: { [Op.like]: `%${term}%` } },
+      ];
     }
-    const { count, rows } = await Host.findAndCountAll({where:filter,order:order,offset:isNaN(offset) ? 0 : parseInt(offset),limit:isNaN(limit) ? 10 : parseInt(limit),search:search});
+
+    const { count, rows } = await Host.findAndCountAll({
+      where,
+      order,
+      offset: isNaN(offset) ? 0 : parseInt(offset),
+      limit: isNaN(limit) ? 10 : parseInt(limit),
+    });
     return {
       data: rows,
       totalCount: count
