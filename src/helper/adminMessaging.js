@@ -1,5 +1,10 @@
-const { initializeApp, getApps, getApp } = require('firebase-admin/app');
-const { credential } = require('firebase-admin');
+// firebase-admin v14 REMOVED the legacy `credential` namespace from the
+// package root: `require('firebase-admin').credential` is now undefined, so
+// `credential.cert(...)` threw "Cannot read properties of undefined (reading
+// 'cert')" at module load — before the server could listen, which Railway saw
+// only as a healthcheck timeout. `cert` comes from 'firebase-admin/app', the
+// same modular entry point this file already imports initializeApp from.
+const { initializeApp, getApps, getApp, cert } = require('firebase-admin/app');
 const { getMessaging } = require('firebase-admin/messaging');
 
 // USER_SERVICE_ACCOUNT holds the Firebase service account, either as
@@ -15,7 +20,7 @@ const serviceAccount = JSON.parse(
 let app;
 if (!getApp('user-app')) {
     app = initializeApp({
-        credential: credential.cert({
+        credential: cert({
             projectId: serviceAccount.project_id,
             private_key: serviceAccount.private_key,
             type: serviceAccount.type,
