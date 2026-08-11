@@ -160,7 +160,18 @@ const reviewVehicleDocument = async (req, res) => {
 const setVehiclePhysicalCheck = async (req, res) => {
   try {
     const result = await vehicleReviewService.setPhysicalCheck(
-      req.params.id, { item: req.body.item, status: req.body.status, reason: req.body.reason }, req.admin,
+      req.params.id,
+      {
+        item: req.body.item,
+        status: req.body.status,
+        reason: req.body.reason,
+        // Passed through as-is, INCLUDING undefined: the service distinguishes
+        // "not supplied, keep the existing photos" from an explicit [] that
+        // clears them. Defaulting to [] here would make every status change
+        // silently wipe the evidence.
+        images: req.body.images,
+      },
+      req.admin,
     );
     res.status(200).json(result);
   } catch (error) {

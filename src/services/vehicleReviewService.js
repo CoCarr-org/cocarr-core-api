@@ -11,6 +11,7 @@ const VehiclePhysicalVerification = require('../models/vehiclePhysicalVerificati
 const FeatureFlag = require('../models/featureFlag');
 const documentStore = require('./documentStoreService');
 const { logActivity } = require('./activityLogService');
+const { toPublicUrl, extractKey } = require('../utils/publicUrl');
 
 // Vehicle approval — the counterpart of userVerificationService, built to the
 // same rule: a vehicle goes live ONLY when an admin presses Approve, and Approve
@@ -134,7 +135,8 @@ async function getForReview(vehicleId) {
       host: hostUser
         ? { userId: hostUserId, name: hostUser.name, verificationStatus: hostVerificationStatus }
         : null,
-      physical: physicalRow ? physicalRow.toJSON() : null,
+      // Keys are stored; URLs are what a client can put in an <img src>.
+      physical: projectPhysical(physicalRow),
       physicalRequired,
       physicalItems: VehiclePhysicalVerification.ITEMS,
       outstanding,
@@ -170,7 +172,20 @@ async function reviewDocument(vehicleId, docType, { status, reason }, admin) {
 }
 
 // ── Physical verification (one item at a time) ───────────────────────────────
-async function setPhysicalCheck(vehicleId, { item, status, reason }, admin) {
+// Stored image KEYS -> proxy URLs, per item. Everything else on the row passes
+// through untouched, so adding a column does not mean editing this function.
+function projectPhysical(row) {
+  if (!row) return null;
+  const out = row.toJSON();
+  VehiclePhysicalVerification.ITEMS.forEach((item) => {
+    const keys = Array.isArray(out[`${item}Images`]) ? out[`${item}Images`] : [];
+    out[`${item}Images`] = keys;
+    out[`${item}ImageUrls`] = keys.map((k) => toPublicUrl(k) || k);
+  });
+  return out;
+}
+
+async function setPhysicalCheck(vehicleId, { item, status, reason, images }, admin) {
   if (!VehiclePhysicalVerification.ITEMS.includes(item)) {
     throw badRequest(`Unknown physical check: ${item}`);
   }
@@ -180,17 +195,55 @@ async function setPhysicalCheck(vehicleId, { item, status, reason }, admin) {
 
   await loadVehicle(vehicleId); // 404s if the vehicle is gone
   const row = await ensurePhysicalRow(vehicleId);
+
+  // Images arrive as object keys or as already-proxied URLs, depending on which
+  // upload helper the client used; `extractKey` normalises both to a bare key
+  // and is the same function the proxy route resolves with. Storing a URL would
+  // pin the row to today's public host — the exact breakage toPublicUrl exists
+  // to repair.
+  //
+  // `undefined` means "not supplied, leave what is there"; an explicit `[]`
+  // clears. Conflating them would make a status change silently discard the
+  // photographs taken on the previous call.
+  const supplied = images === undefined
+    ? undefined
+    : (Array.isArray(images) ? images : [images])
+      .map((v) => extractKey(String(v || '')))
+      .filter(Boolean);
+
+  const nextImages = supplied === undefined ? (row[`${item}Images`] || []) : supplied;
+
+  if (
+    status === 'verified'
+    && VehiclePhysicalVerification.EVIDENCE_REQUIRED.includes(item)
+    && nextImages.length === 0
+  ) {
+    throw badRequest(
+      'Add at least one photograph of the vehicle before marking the physical check verified.',
+    );
+  }
+
   const previous = row[`${item}Status`];
   await row.update({
     [`${item}Status`]: status,
     [`${item}Reason`]: status === 'rejected' ? text : null,
+    ...(supplied === undefined ? {} : { [`${item}Images`]: nextImages }),
+    // Stamped on the first real verdict, so the record says who attended rather
+    // than only who last edited the row.
+    inspectedByAdminId: row.inspectedByAdminId || admin?.id || null,
+    inspectedByName: row.inspectedByName || admin?.name || null,
+    inspectedAt: row.inspectedAt || new Date(),
     reviewedByAdminId: admin?.id || null,
   });
 
   await logActivity({
     adminId: admin?.id, adminName: admin?.name, action: `physical-${status}`,
     entityType: 'VehiclePhysical', entityId: vehicleId,
-    changes: { [`${item}Status`]: { from: previous, to: status }, reason: text || null },
+    changes: {
+      [`${item}Status`]: { from: previous, to: status },
+      reason: text || null,
+      images: nextImages.length,
+    },
   });
 
   return getForReview(vehicleId);
