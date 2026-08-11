@@ -579,20 +579,13 @@ async function confirmLicenceNumber(userId, body = {}) {
 
 // ── PAN: step 1, read the card ─────────────────────────────────────────────
 //
-// The PAN counterpart of scanAadhaar/scanLicence, and captured BOTH FACES like
-// them. The number and the printed name are on the front, so that is the only
-// face OCR reads — but the back is what a reviewer needs to judge a card that
-// has been tampered with or laminated over, and capturing one face here while
-// Aadhaar and the licence take two was an inconsistency the host felt.
-//
-// The images are stored FIRST so a failed read can be retried against them, the
-// front is OCR'd for the number and the printed name, and when the number
-// cannot be read `confirmPanNumber` collects it.
-//
-// The back is REQUIRED on this path, matching scanLicence. It is nullable on the
-// row because rows written before the column existed have a front and nothing
-// else; `PUT /user/update-pan` (the standalone PAN screens) is a separate,
-// single-faced path and is deliberately left alone.
+// The PAN counterpart of scanAadhaar/scanLicence, and deliberately SINGLE-FACED
+// — unlike them. A PAN card carries the number and the printed name on the
+// front, and the back holds nothing we extract or review, so asking for it was
+// a step that cost the host time and bought nothing. The image is stored FIRST
+// so a failed read can be retried against it, the front is OCR'd for the number
+// and the printed name, and when the number cannot be read `confirmPanNumber`
+// collects it.
 //
 // PAN belongs to the user (the host in the listing flow), one row per
 // submission, exactly like the other documents. `providerStatus` on the row is
@@ -620,25 +613,20 @@ async function scanPan(userId, body = {}) {
     };
   }
 
-  if (!image) throw badRequest('Upload the front of your PAN card');
-  if (!body.backImage) throw badRequest('Upload the back of your PAN card');
+  if (!image) throw badRequest('Upload a photo of your PAN card');
 
   const front = bufferOf(image);
   const ocr = front
     ? await ocrService.runOcr('pan', front.buffer, front.mimeType)
     : { status: 'UNCHECKED', fields: {}, raw: null, verificationId: null, message: 'No image to read' };
 
-  const [imageKey, backImageKey] = await Promise.all([
-    storeImage(image, 'pan'),
-    storeImage(body.backImage, 'pan'),
-  ]);
+  const imageKey = await storeImage(image, 'pan');
 
   const ocrNumber = normalisePan(ocr.fields.panNumber);
   const readNumber = PAN_RE.test(ocrNumber) ? ocrNumber : null;
 
   const fields = {
     imageKey,
-    backImageKey,
     ocrStatus: ocr.status,
     ocrVerificationId: ocr.verificationId,
     ocrFields: ocr.fields,

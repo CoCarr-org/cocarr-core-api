@@ -415,9 +415,6 @@ async function getStatus(userId) {
         submitted: !!pan?.panNumber, verified: pan?.status === 'verified',
         status: pan?.status || null, rejectionReason: pan?.rejectionReason || null,
         imageKey: pan?.imageKey || null,
-        // The back carries nothing we extract, but it is half of what a
-        // reviewer is looking at. Null on rows captured before both faces.
-        backImageKey: pan?.backImageKey || null,
         holderName: pan?.holderName || null,
         providerStatus: pan?.providerStatus || null,
         ocr: buildOcrView(pan),
