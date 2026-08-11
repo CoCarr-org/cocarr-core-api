@@ -167,6 +167,20 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
       includeOptions.push({
         model: Pickup,
         as: 'pickupPoint',
+        // `required` MUST be explicit. Adding the include with a `where` (the
+        // city path) makes Sequelize default it to required -> INNER JOIN, and
+        // that path works. Adding it WITHOUT a where (the geo path) defaults to
+        // required:false -> LEFT OUTER JOIN, and production still answered
+        // "Unknown column 'pickupPoint.lat' in 'field list'" — the alias is not
+        // in scope for the SELECT that Sequelize actually emits for a
+        // non-required include alongside `limit` and duplicating hasMany
+        // includes.
+        //
+        // INNER is also the honest semantics: the distance is computed FROM the
+        // pickup point, so a vehicle without one has no distance and cannot be
+        // a result of a location search. This makes the geo path structurally
+        // identical to the city path, which is the one known to work.
+        required: true,
         // No city filter when we are only here for the coordinates.
         ...(filters?.city ? { where: { cityId: filters.city } } : {}),
       });
