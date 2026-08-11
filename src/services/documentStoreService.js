@@ -202,6 +202,9 @@ function projectUserDocuments({ kyc, pan, licence }) {
     panNumber: pan?.panNumber ?? null,
     panName: pan?.holderName ?? null,
     panImage: pan?.imageKey ?? null,
+    // `panImage` keeps meaning the FRONT, so nothing reading it had to change.
+    // Null on every row submitted before PAN was captured both faces.
+    panBackImage: pan?.backImageKey ?? null,
     panVerified: pan ? pan.status === 'verified' : false,
     panProviderStatus: pan?.providerStatus ?? null,
     panProviderName: pan?.providerName ?? null,

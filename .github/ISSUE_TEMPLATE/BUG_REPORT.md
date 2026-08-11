@@ -1,29 +1,51 @@
 ---
 name: Bug report
-about: Report a defect so we can fix it
-title: "[Bug]: "
-labels: ["bug"]
-assignees: []
+about: Report something that is not working as intended
+title: "bug: "
+labels: bug
+assignees: ""
 ---
 
-## Description
-A clear and concise description of the bug.
+<!-- Managed by RepoGuard. Local edits are overwritten on the next `repo enforce`. -->
 
-## Steps to Reproduce
-1. Go to '...'
-2. Run '...'
-3. See error
+## What happened
 
-## Expected Behaviour
-What you expected to happen.
+<!-- A clear description of the incorrect behaviour. -->
 
-## Actual Behaviour
-What actually happened.
+## What was expected
+
+<!-- What should have happened instead. -->
+
+## Steps to reproduce
+
+1.
+2.
+3.
 
 ## Environment
-- Service / package version:
-- OS:
-- Runtime version:
 
-## Additional Context
-Logs, screenshots or related issues.
+| Field | Value |
+| --- | --- |
+| Version / commit | |
+| Environment | production / staging / local |
+| Operating system | |
+| Browser or client | |
+
+## Evidence
+
+<!-- Logs, stack traces, screenshots, request IDs. Redact secrets first. -->
+
+```text
+
+```
+
+## Impact
+
+- [ ] Blocks release
+- [ ] Affects production users
+- [ ] Data integrity or security concern
+- [ ] Workaround available (describe below)
+
+## Additional context
+
+<!-- Anything else that helps diagnose the problem. -->

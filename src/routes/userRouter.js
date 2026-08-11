@@ -89,9 +89,14 @@ router.post('/verification/aadhaar/number', authenticateUser, userController.con
 // only when OCR could not read one.
 router.post('/verification/licence/scan', authenticateUser, userController.scanLicence);
 router.post('/verification/licence/number', authenticateUser, userController.confirmLicenceNumber);
+// PAN capture mirrors the licence: scan the card, then a number only when OCR
+// could not read one. Used by the host listing wizard's PAN step. Registered
+// above the `:kind` retry route so the literal paths win.
+router.post('/verification/pan/scan', authenticateUser, userController.scanPan);
+router.post('/verification/pan/number', authenticateUser, userController.confirmPanNumber);
 // Re-reads a scan already on file. This is what "retry verification" means — a
 // failed read must not cost the user their photographs.
-router.post('/verification/:kind(aadhaar|licence)/retry-ocr', authenticateUser, userController.retryDocumentOcr);
+router.post('/verification/:kind(aadhaar|licence|pan)/retry-ocr', authenticateUser, userController.retryDocumentOcr);
 // Legacy single-shot submits, kept for clients still on the OTP-first order.
 // Registered AFTER the sub-paths above so neither swallows the other.
 router.post('/verification/aadhaar', authenticateUser, userController.submitAadhaar);
