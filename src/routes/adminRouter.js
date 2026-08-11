@@ -38,9 +38,19 @@ router.get('/schedule', authenticateAdmin,requirePermission('vehicles','read'),a
 router.get('/schedule/:id', authenticateAdmin,requirePermission('vehicles','read'),adminController.getScheduleById);
 router.get('/vehicle', authenticateAdmin,requirePermission('vehicles','read'),adminController.getAllVehicles);
 router.get('/vehicle/:id', authenticateAdmin,requirePermission('vehicles','read'),adminController.getVehicleById);
+// Full review payload for the approval screen (docs, host, physical, live).
+// Registered before the bare `/vehicle/:id` actions below — all distinct paths.
+router.get('/vehicle/:id/review', authenticateAdmin,requirePermission('vehicles','read'),adminController.getVehicleReview);
 router.post('/vehicle/:id/approve', authenticateAdmin,requirePermission('vehicles','update'),adminController.approveVehicle)
 router.post('/vehicle/:id/reject', authenticateAdmin,requirePermission('vehicles','update'),adminController.rejectVehicle);
 router.post('/vehicle/:id/suspend', authenticateAdmin,requirePermission('vehicles','update'),adminController.suspendVehicle);
+// Damaged / under-repair → maintenance (and back).
+router.post('/vehicle/:id/maintenance', authenticateAdmin,requirePermission('vehicles','update'),adminController.maintainVehicle);
+// Verify/reject the RC or the host's PAN (docType = rc | pan).
+router.post('/vehicle/:id/document/:docType', authenticateAdmin,requirePermission('vehicles','update'),adminController.reviewVehicleDocument);
+// One physical-inspection item. Reuses vehicles.update — a dedicated physical
+// role is a team/level granted the vehicles module.
+router.post('/vehicle/:id/physical-check', authenticateAdmin,requirePermission('vehicles','update'),adminController.setVehiclePhysicalCheck);
 
 // --- Bookings ---
 router.get('/booking', authenticateAdmin,requirePermission('bookings','read'),adminController.getAllBookings);

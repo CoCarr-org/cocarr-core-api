@@ -203,8 +203,19 @@ const Vehicle = db.define('vehicle', {
   // would otherwise have silently started including rejected vehicles.
   approvalStatus:{
     type: DataTypes.ENUM,
-    values: ['pending', 'approved', 'rejected', 'suspended'],
+    // `maintenance` = a damaged / under-repair car taken off the platform
+    // (not live, not bookable) while keeping its approved history. Distinct
+    // from `suspended`, which is an ops ban for misconduct — the host sees
+    // "in maintenance", not "suspended". Both set isAdminApproved=false.
+    values: ['pending', 'approved', 'rejected', 'suspended', 'maintenance'],
     defaultValue: 'pending',
+  },
+  // Why the car is off the platform for repair, and when it was marked.
+  maintenanceReason:{
+    type: DataTypes.TEXT,
+  },
+  maintenanceAt:{
+    type: DataTypes.DATE,
   },
   // Suspension hides the vehicle from search and blocks new bookings while
   // keeping every record intact — deliberately NOT a delete. Kept separate

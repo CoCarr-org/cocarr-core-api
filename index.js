@@ -11,6 +11,7 @@ const rescheduleModel = require('./src/models/reschedule.js')
 const settingsModel = require('./src/models/settings.js')
 const transactionModel = require('./src/models/transaction.js')
 const vehicleModel = require('./src/models/vehicle.js')
+const vehiclePhysicalVerificationModel = require('./src/models/vehiclePhysicalVerification.js')
 const fcmTokenModel = require('./src/models/fcmTokens.js')
 const imageModel = require('./src/models/image')
 const vehiclePreferenceModel = require('./src/models/vehiclePreference.js');
@@ -172,6 +173,9 @@ async function initialize() {
     // admin to remember.
     await runStep('Default protection plan', addDefaultProtectionPlan);
     await runStep('Default membership type', addDefaultMembershipType);
+    // Seeds the (default-off) vehicle physical-verification feature flag so it
+    // is visible and toggleable in the Feature Flags screen from day one.
+    await runStep('Vehicle feature flags', require('./src/services/vehicleReviewService.js').ensureDefaultFlag);
   }
   await runStep('Payout scheduler', async () => initializePayoutScheduler());
   // Weekly host settlement. Gated behind SETTLEMENT_CRON_ENABLED so deploying
