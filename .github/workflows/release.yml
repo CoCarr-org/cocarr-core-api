@@ -1,0 +1,85 @@
+# RELEASE — migrate, THEN deploy. The order is the whole point.
+#
+# A deploy that ships code before its schema runs new code against an old
+# database: it looks healthy and writes to columns that may not exist. A deploy
+# that migrates first, and STOPS if the migration fails, leaves the previous
+# container serving — which is the correct outcome, because a working old
+# version beats a broken new one.
+#
+# This also fixes the replica race. Migrations run ONCE in this job, not in
+# every booting container. Two replicas starting together would otherwise issue
+# the same DDL concurrently, and MySQL DDL is not transactional — you get a
+# half-applied change with no way to tell which one won.
+name: Release
+
+on:
+  push:
+    branches: [develop]        # -> staging
+  release:
+    types: [published]         # -> production (a tagged, deliberate act)
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  # Never two releases to the same environment at once. Without this, two merges
+  # a minute apart can interleave migrations.
+  group: release-${{ github.event.inputs.environment || (github.event_name == 'release' && 'production' || 'staging') }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment:
+      # Production should carry a required reviewer in the repo's Environments
+      # settings. That approval gate is the difference between "promoted" and
+      # "whatever merged last".
+      name: ${{ github.event.inputs.environment || (github.event_name == 'release' && 'production' || 'staging') }}
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --omit=dev --no-audit --no-fund
+
+      # 1. SAY WHAT WILL HAPPEN before it happens. This shows up in the run log,
+      #    so a surprising migration is visible in review rather than after.
+      - name: Migration plan
+        run: npm run migrate:status
+
+      # 2. BACK UP FIRST. A migration is the one deploy step that cannot be
+      #    rolled back by redeploying the previous image.
+      - name: Backup reminder
+        if: ${{ github.event_name == 'release' }}
+        run: |
+          echo "::warning::Production migration — confirm a database snapshot exists before this run."
+
+      # 3. MIGRATE. Failure fails the job, and the deploy step below never runs.
+      - name: Apply migrations
+        run: npm run migrate:up
+
+      # 4. Only now does new code take traffic.
+      - name: Deploy
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "::error::RAILWAY_TOKEN not set — migrations ran but nothing deployed."
+            exit 1
+          fi
+          npm i -g @railway/cli
+          railway redeploy --service core --yes --from-source
+
+      # 5. Prove the released revision agrees with the schema it is running on.
+      - name: Verify no pending migrations
+        run: npm run migrate:check
