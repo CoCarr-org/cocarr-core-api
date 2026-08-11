@@ -224,8 +224,12 @@ const scanAadhaar = verificationHandler((req) => onboardingDocs.scanAadhaar(req.
 const confirmAadhaarNumber = verificationHandler((req) => onboardingDocs.confirmAadhaarNumber(req.userId, req.body));
 const scanLicence = verificationHandler((req) => onboardingDocs.scanLicence(req.userId, req.body));
 const confirmLicenceNumber = verificationHandler((req) => onboardingDocs.confirmLicenceNumber(req.userId, req.body));
-// One handler for both documents — the kind is the route, not the payload, so a
-// client cannot ask us to OCR something we do not scan.
+// PAN follows the same scan → confirm-number shape as the licence, so a host can
+// verify their PAN inside the listing wizard the way KYC works during signup.
+const scanPan = verificationHandler((req) => onboardingDocs.scanPan(req.userId, req.body));
+const confirmPanNumber = verificationHandler((req) => onboardingDocs.confirmPanNumber(req.userId, req.body));
+// One handler for every scanned document — the kind is the route, not the
+// payload, so a client cannot ask us to OCR something we do not scan.
 const retryDocumentOcr = verificationHandler((req) => onboardingDocs.retryDocumentOcr(req.userId, req.params.kind));
 const submitAadhaar = verificationHandler((req) => onboardingDocs.submitAadhaar(req.userId, req.body));
 const submitLicence = verificationHandler((req) => onboardingDocs.submitLicence(req.userId, req.body));
@@ -274,5 +278,6 @@ module.exports = {precheck,getMyBookings,getMyPayments,getAllUsers,updateInfo,up
   submitVerification,
   scanAadhaar, confirmAadhaarNumber,
   scanLicence, confirmLicenceNumber, retryDocumentOcr,
+  scanPan, confirmPanNumber,
   submitAadhaar, submitLicence, submitSelfie,
   sendOtp,verifyOtp};

@@ -131,6 +131,10 @@ DrivingLicence.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 Vehicle.hasMany(VehicleRcDocument, { foreignKey: 'vehicleId', as: 'rcDocuments' });
 VehicleRcDocument.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
 
+const VehiclePhysicalVerification = require('./vehiclePhysicalVerification');
+Vehicle.hasOne(VehiclePhysicalVerification, { foreignKey: 'vehicleId', as: 'physicalVerification' });
+VehiclePhysicalVerification.belongsTo(Vehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
 // OtherDocument is intentionally NOT associated — it is polymorphic, so there
 // is no single model to point a foreign key at. Query it by ownerType+ownerId.
 

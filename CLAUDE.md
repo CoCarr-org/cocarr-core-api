@@ -280,7 +280,18 @@ Routes on `adminModulesRouter`: `/admin/campaigns*` (note `/campaigns/segments` 
 - `GET /admin/vehicle-rc`, `PUT /admin/vehicle-rc/:id` — RC number/image plus the RC-derived fields (engine, chassis, maker, colour). Note the model has **both** `vehicleRcVerified` (the admin-facing flag this screen toggles) and `rcVerified`/`rcVerificationId` (the Cashfree provider result) — they are different things and the UI shows both.
 - `GET /admin/host-bank-accounts`, `PUT /admin/host-bank-accounts/:id` — sets `isVerified` **and** `isManuallyVerified`, so an admin override stays distinguishable from a penny-drop-verified account. The service computes `nameMismatch` (host-typed name vs bank-returned name), which is the main fraud signal on that screen.
 
-**There is no `Vehicle → Host` association on the model** (only `owner`, `pickupPoint`, `brand`, `vehiclePlan`) — an `include: [{model: Host, as: 'host'}]` throws. `listVehicleRc` fetches hosts in a second query and stitches them; do the same rather than adding an association casually.
+**`Vehicle → Host` now exists** (`association.js`: `Vehicle.belongsTo(Host, { as: 'host' })` via `hostId`, and `Host.belongsTo(User, { as: 'user' })`), so `include: [{ model: Host, as: 'host', include: [{ model: User, as: 'user' }] }]` is the supported way to reach the host and their identity/PAN — `adminService.getVehicleById` and `vehicleReviewService` both use it. (`listVehicleRc` still stitches hosts in a second query; it predates the association and was left alone.)
+
+## Vehicle approval & physical verification
+Built to mirror the user verification flow (`userVerificationService`): a vehicle goes live ONLY through a gated Approve, never as a side effect of a document decision. `src/services/vehicleReviewService.js` + routes on `adminRouter`.
+
+- **`approvalStatus`** on the Vehicle model is `pending | approved | rejected | suspended | maintenance`. `maintenance` is new — a damaged/under-repair car taken off the platform (`isAdminApproved=false`, reversible, `maintenanceReason`/`maintenanceAt`) that does NOT look rejected or suspended to the host. Every public listing query still gates on `isAdminApproved`, so suspended and maintenance both drop out of search.
+- **`approve()` refuses** unless the RC is verified, the host's PAN is verified, the host is `active`, and — when the `vehicle.physicalVerification` feature flag is on — all four physical checks are verified. It names what's outstanding, exactly like the user approve gate. Approving sets `approved` + `isAdminApproved` + `active`.
+- **Per-document review** reuses `documentStore.review('rc'|'pan', …)` — RC keyed by `vehicleId`, host PAN by the host's `userId`.
+- **Physical verification** (`vehiclePhysicalVerification` model, one row/vehicle, per-item `{vehicle,rc,pan,host}Status`+`Reason`) is an in-person inspection. Gated by the `vehicle.physicalVerification` **feature flag** (`featureFlag` row, seeded default-OFF at boot; env override `VEHICLE_PHYSICAL_VERIFICATION=true|false`). **This is the first code that actually reads a feature flag.** When off, the section is hidden and not required.
+- Endpoints (all `vehicles.update`, except review = `vehicles.read`): `GET /admin/vehicle/:id/review`, `POST /admin/vehicle/:id/document/:docType` (`docType`=`rc|pan`, body `{status, reason}`), `POST /admin/vehicle/:id/physical-check` (`{item, status, reason}`), `POST /admin/vehicle/:id/approve` (now gated), `POST /admin/vehicle/:id/maintenance` (`{maintenance, reason}`). `/reject` and `/suspend` are unchanged.
+- **"Live"** is computed, not stored: `approved && active &&` an available `schedule` window (`Schedule` row, `status='available'`, `deleted=false`) covers now. The review payload returns `isLive`/`liveReason`.
+- New model registered in `association.js` + `index.js`; run `scripts/syncNewTables.js` (new table) and the alter-sync (ENUM value + `maintenanceReason`/`maintenanceAt`) after deploy.
 
 ## Damage claims
 Hosts file damage claims from the app (`POST /damage/create`, within **240 hours / 10 days** of booking end — enforced in `damageService.createDamage`). Before this there was **no admin-side view**: `damageRouter` only exposed get-by-id and get-by-booking, both behind `authenticateUser`.
@@ -321,7 +332,15 @@ This is separate from `payoutScheduler.js`, which runs **hourly** and only build
 - **Editing a rejected vehicle IS the resubmission**: `hostService.updateVehicle` flips `rejected → pending` and clears the reason, so the host isn't left staring at feedback they've already addressed.
 
 ## PAN capture
-`PUT /user/update-pan` — `panNumber` (validated `^[A-Z]{5}[0-9]{4}[A-Z]$`, upper-cased and stripped server-side), `panName`, `panImage`. Changing the PAN resets `panVerified` to false so a new card goes back through review instead of inheriting an old approval.
+Two write paths, both landing on the `panCards` table via `documentStore`:
+- `PUT /user/update-pan` — the legacy direct submit used by the standalone `/verify/pan` page: `panNumber` (validated `^[A-Z]{5}[0-9]{4}[A-Z]$`, upper-cased and stripped server-side), `panName`, `panImage` (already uploaded to the `pan` folder).
+- `POST /user/verification/pan/scan` + `POST /user/verification/pan/number` + `POST /user/verification/pan/retry-ocr` — the **KYC-style OCR flow**, used by the listing wizard's PAN step (`onboardingDocumentService.scanPan`/`confirmPanNumber`). Mirrors the licence exactly: `scan` stores the card (base64 → `pan` folder), OCRs it (`documentOcrService` `pan` document-type, `KYC_OCR_TYPE_PAN` override), returns `needsManualEntry`; `number` confirms the PAN and runs the advisory registry check; `retry-ocr` re-reads the stored image.
+
+  **`scan` takes BOTH FACES** — `frontImage` and `backImage`, both required, exactly like `scanLicence`. Only the **front** is OCR'd (the number and the printed name are not on the back) and `retry-ocr` still re-reads the front alone; the back exists for the reviewer, who needs it to spot a tampered or laminated-over card. `panCards.backImageKey` is **nullable** because every row submitted before this has a front and nothing else, and those must keep reading cleanly — `projectUserDocuments` emits `panBackImage: null` for them while `panImage` keeps meaning the front, so nothing that already read it changed. Added by `db.sync({alter:true})` on boot (a plain nullable column, no index change).
+
+  ⚠ **`PUT /user/update-pan` is deliberately still single-faced.** It backs the standalone `/verify/pan` page and mobile's `PanVerificationScreen`, which were not part of the listing-flow change. Those two screens still capture one face — worth closing later so PAN is captured the same way everywhere. **`panCards` gained `ocrStatus/ocrVerificationId/ocrFields/ocrRaw/ocrCheckedAt/manualConsent/manualConsentAt`** for this (added on boot by `db.sync({alter:true})`). The advisory `providerStatus` (PAN registry) stays separate from `ocrStatus` (reading the photo).
+
+Both paths keep `panVerified` an admin decision, and changing the PAN starts a new submission rather than inheriting an old approval.
 
 **Security fix made here:** `updateKycInfo` and `updateLicenseInfo` both built a whitelist object `data` and then called `user.update(updatedData)` with the **raw request body**. An authenticated user could `PUT /user/update-license` with `{"licenseVerified":true,"kycVerified":true}` and verify themselves — the exact decision an admin is supposed to own. Both now write only the whitelisted fields, and `updatePanInfo` follows the same discipline. **Never pass a request body straight to `user.update()`.**
 
@@ -417,15 +436,22 @@ The provider needs licence number **and** date of birth — DOB is the second fa
 
 **Never throws on a provider failure** — returns `{status: 'UNCHECKED'}` and the submission proceeds to manual review, matching the PAN behaviour. The one exception is a malformed licence number, which is a typo, not a verdict, and is rejected as a 400. Auth/IP failures are logged as OUR misconfiguration rather than surfacing as "your licence is wrong".
 
-## Vehicle listing wizard — bank details step
-`ListYourCarPage.jsx` now has 8 steps; **Bank Details sits between Pricing and Review** per PRD §5, and the account appears in the review card per §6.
+## Vehicle listing wizard — 9 steps, bank + PAN before review
+`ListYourCarPage.jsx` (web) and `AddCar.js` (mobile) now run the SAME 9 steps:
+**RC → Details → Photos → Location → Preferences → Pricing → Bank → PAN → Review.**
+Mobile previously had no bank step (bank lived only in `HostBankPage`); it now has one in-wizard too, so the two platforms match. Bank and PAN are stored per host and reused for every car.
 
-- **Scenario A** — an active account exists: it's shown (account masked to last 4), with "Use a different account". An unverified existing account is flagged, since payouts are on hold until it verifies.
-- **Scenario B** — none exists: the form is shown and must verify before Review is reachable.
+- **Bank — Scenario A** — an active account exists: shown (account masked to last 4), with "Use a different account". An unverified existing account is flagged, since payouts are on hold until it verifies. **Scenario B** — none exists: the form is shown and must verify before continuing.
+- **PAN (step 8)** is captured with the SAME KYC document flow as Aadhaar/licence (scan → OCR read → `OcrFallback` retry / manual number), see the OCR section below. An already-verified/submitted PAN just shows and the step continues.
+  **Both faces, in the RC step's own capture UI** — web renders two `DocImage` tiles in a `.doc-row` (identical markup to the RC step); mobile renders two `DocTile`s, a module-scope component in the RC tile's visual language (dashed when empty, brand-coloured when filled) sized to sit two-up. Picking one face never clears the other: replacing a blurry back must not cost a front that already scanned.
+  **A successful PAN submission goes straight to Review**, from all three routes into it (scan, retry-OCR, manual entry) — PAN is the last thing collected, so finishing it *is* the end of data entry. Web `setStep(STEP_REVIEW)` / mobile `handleNext()`, both inside `confirmPan`/`confirm` so no path can miss it.
+- **The mock "SAMPLE · REGISTRATION CERTIFICATE" card above the RC upload is gone**, on both clients (web's `.rc-sample*` CSS deleted with it). The labelled capture tiles already say which face goes where, and a fake card sitting above real upload slots read as another thing to tap.
 
-`loadBankAccount()` runs both when Pricing continues and when the step dots jump back to step 7. After a successful save it **re-reads** rather than trusting the POST body, because the bank returns the authoritative holder and bank name, which often differ from what was typed.
+`loadBankAccount()`/`loadPan()` run when Pricing/Bank continue and when the step rail jumps back. After a bank save it **re-reads** rather than trusting the POST body (the bank returns the authoritative holder and bank name).
 
-**The manual-RC-retry from PRD §3 already existed** — step 1 has an "or verify by car number" path that the OCR failure message points at.
+**RC uses the KYC document UI** — the web `DocImage`/`OcrFallback` widgets (shared in `components/app/DocCapture.jsx`), reusing the existing `/host/vehicles/rc-ocr` + `/host/vehicles/verify` endpoints (RC has no base64 `scan`/`retry-ocr`; "retry" re-posts the held file, and the manual "verify by car number" is the OcrFallback's manual path).
+
+**Photos** include named interior slots (Dashboard / Front Seats / Rear Seats) alongside the exterior angles. `Image.type` is a plain VARCHAR, so these are just new strings — no migration.
 
 ## Signup & KYC — the actual flow, both sides
 **User (mobile + web):** mobile number → OTP → onboarding → enter details → **upload driving licence** → **authenticate with Aadhaar** → submit → *Verification Pending*.
@@ -487,7 +513,9 @@ Cancellations: **host or admin cancelled ⇒ full refund** including the conveni
 ## Onboarding: OCR-backed Aadhaar + licence capture
 `src/services/documentOcrService.js` + `src/services/onboardingDocumentService.js`.
 
-There are **three document-verification touchpoints** in the product: Aadhaar + licence during USER onboarding (these two), and PAN + bank details during HOST onboarding (elsewhere). Only the first pair goes through the OCR service.
+There are document-verification touchpoints across the product: Aadhaar + licence during USER onboarding, and PAN + bank during HOST onboarding. **Aadhaar, licence AND PAN all go through the OCR service now** (`documentOcrService` carries `aadhaar`/`licence`/`pan` document-type candidates and extractors); PAN's scan/number/retry live in `onboardingDocumentService` alongside the other two and share `retryDocumentOcr`/`reRunOcr` via the `SCANNED_KINDS` map. Bank details are the one touchpoint that is a registry check only, not OCR.
+
+> Note: `retryDocumentOcr` previously read a `fields` key off `reRunOcr`'s return that never existed, so a successful "retry verification" silently never recorded the number. It now reads the extracted number back from the reloaded row's `ocrFields` — fixed for all three kinds while wiring PAN in.
 
 OCR uses the **same** Cashfree `bharat-ocr` endpoint and 2FA credentials that already power vehicle-RC scanning in `hostService` — `document_type` is `AADHAAR` or `DRIVING_LICENSE`, alongside the existing `VEHICLE_RC`. Deliberately constants, not env vars: three knobs for one provider contract is how they drift apart.
 

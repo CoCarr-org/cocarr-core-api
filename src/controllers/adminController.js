@@ -1,6 +1,7 @@
 // user.controller.js
 const { validationResult } = require('express-validator');
 const adminService = require('../services/adminService');
+const vehicleReviewService = require('../services/vehicleReviewService');
 const { getPermissionMatrix, updatePermissionMatrix } = require('../services/permissionService');
 const { ADMIN_ROLE_LABELS, ADMIN_ROLE_DESCRIPTIONS, ADMIN_ROLE_ORDER } = require('../utils/adminRoles');
 // const { getVehicleById } = require('./vehicleController');
@@ -122,10 +123,58 @@ const getVehicleById = async (req, res) => {
   }
 }
 
+// Approve is now gated: it refuses unless RC, host PAN and host identity are
+// verified (and, when the feature flag is on, the physical checks too).
 const approveVehicle = async (req, res) => {
   try {
-    const vehicle = await adminService.approveVehicle(req.params.id, req.admin);
+    const vehicle = await vehicleReviewService.approve(req.params.id, req.admin);
     res.status(200).json(vehicle);
+  } catch (error) {
+    res.status(Number(error.statusCode) || 500).json({ error: error.message });
+  }
+}
+
+// Full review payload — vehicle, RC + host PAN docs, host identity, physical
+// checks, what's outstanding, and whether the car is live.
+const getVehicleReview = async (req, res) => {
+  try {
+    res.status(200).json(await vehicleReviewService.getForReview(req.params.id));
+  } catch (error) {
+    res.status(Number(error.statusCode) || 500).json({ error: error.message });
+  }
+}
+
+// Verify / reject the RC or the host's PAN, with a reason on reject.
+const reviewVehicleDocument = async (req, res) => {
+  try {
+    const result = await vehicleReviewService.reviewDocument(
+      req.params.id, req.params.docType, { status: req.body.status, reason: req.body.reason }, req.admin,
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(Number(error.statusCode) || 500).json({ error: error.message });
+  }
+}
+
+// One physical-inspection item (vehicle | rc | pan | host).
+const setVehiclePhysicalCheck = async (req, res) => {
+  try {
+    const result = await vehicleReviewService.setPhysicalCheck(
+      req.params.id, { item: req.body.item, status: req.body.status, reason: req.body.reason }, req.admin,
+    );
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(Number(error.statusCode) || 500).json({ error: error.message });
+  }
+}
+
+// Mark a damaged/under-repair car for maintenance, or restore it.
+const maintainVehicle = async (req, res) => {
+  try {
+    const result = await vehicleReviewService.setMaintenance(
+      req.params.id, { maintenance: req.body.maintenance !== false, reason: req.body.reason }, req.admin,
+    );
+    res.status(200).json(result);
   } catch (error) {
     res.status(Number(error.statusCode) || 500).json({ error: error.message });
   }
@@ -297,6 +346,10 @@ module.exports = {
   approveVehicle,
   rejectVehicle,
   suspendVehicle,
+  getVehicleReview,
+  reviewVehicleDocument,
+  setVehiclePhysicalCheck,
+  maintainVehicle,
   getHostCommissionsByHostId,
   addHostCommissionByAdmin,
   updateHostCommissionByAdmin,

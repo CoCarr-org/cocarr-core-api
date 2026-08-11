@@ -45,3 +45,6 @@ uploads/
 # Firebase service-account keys — provided via env vars, never commit
 src/configs/admin-service-account.json
 src/configs/user-service-account.json
+
+# local bucket-migration credentials (never commit)
+migrate-buckets.env

@@ -370,11 +370,13 @@ async function getUserWallet(userId, { limit = 25 } = {}) {
       ? {
         id: wallet.id,
         walletPoints: wallet.walletPoints,
+        walletPointsUsed: wallet.walletPointsUsed || 0,
         referralPoints: wallet.referralPoints || 0,
+        status: wallet.status,
       }
       // A user with no wallet row has never earned or spent anything. Reported
       // as zeroes rather than null so the screen has nothing to special-case.
-      : { id: null, walletPoints: 0, referralPoints: 0 },
+      : { id: null, walletPoints: 0, walletPointsUsed: 0, referralPoints: 0, status: null },
     transactions: transactions.map((t) => ({
       id: t.id,
       points: t.points,
