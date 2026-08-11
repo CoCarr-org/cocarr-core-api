@@ -22,6 +22,29 @@ const VehiclePreference = require('../models/vehiclePreference');
 
 const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, startTime, endTime, userId, status = true, limit = 10, offset=0,geo}) => {
   try {
+    // A WINDOW IS REQUIRED, AND MUST BE A NUMBER.
+    //
+    // startTime/endTime are UNIX seconds and are interpolated into the SQL as
+    // formatted datetimes. Absent or non-numeric, `new Date(NaN * 1000)` is an
+    // Invalid Date and moment formats it as the literal string 'Invalid date',
+    // which reaches MySQL as `Incorrect DATETIME value: 'Invalid date'` — a 400
+    // that names neither the parameter nor the caller's mistake.
+    //
+    // checkTimeGaps does NOT catch this: every comparison it makes on NaN is
+    // false, so it returns true for `(undefined, undefined)` and the bad value
+    // flows straight through. It answers "is this window long enough", which is
+    // a different question from "is this a window at all".
+    const startSeconds = Number(startTime);
+    const endSeconds = Number(endTime);
+    if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+      throw new CustomError(
+        'startTime and endTime are required, as UNIX timestamps in seconds.', 400,
+      );
+    }
+    if (endSeconds <= startSeconds) {
+      throw new CustomError('endTime must be after startTime.', 400);
+    }
+
     if (!checkTimeGaps(startTime, endTime)) return false;
     console.log('filters', filters);
     console.log('searchTerm', startTime,endTime);
@@ -130,11 +153,22 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
       },
     ];
 
-    if (filters && filters.city) {
+    // THE DISTANCE EXPRESSION REFERENCES `pickupPoint`, SO THE JOIN HAS TO BE
+    // THERE WHENEVER IT IS BUILT — not only when filtering by city.
+    //
+    // This join used to be added for `filters.city` alone, while the distance
+    // expression below is built from `geo` OR the city. So a lat/lng search with
+    // no city produced `Unknown column 'pickupPoint.lat' in 'field list'` — the
+    // rider web app's whole location search.
+    const hasGeo = !!(geo && geo.lat != null && geo.lng != null
+      && !isNaN(geo.lat) && !isNaN(geo.lng));
+
+    if ((filters && filters.city) || hasGeo) {
       includeOptions.push({
         model: Pickup,
         as: 'pickupPoint',
-        where: { cityId: filters.city },
+        // No city filter when we are only here for the coordinates.
+        ...(filters?.city ? { where: { cityId: filters.city } } : {}),
       });
     }
 
@@ -143,7 +177,7 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
     let distanceQuery = '';
     let havingClause = [];
     
-    if (geo && !isNaN(geo.lat) && !isNaN(geo.lng)) {
+    if (hasGeo) {
       distanceQuery = `(6371 * acos(cos(radians(${geo.lat})) * cos(radians(pickupPoint.lat)) * cos(radians(pickupPoint.long) - radians(${geo.lng})) + sin(radians(${geo.lat})) * sin(radians(pickupPoint.lat))))`;
     } else if (filters?.city) {
       const city = await City.findOne({ where: { id: filters.city } });
@@ -162,13 +196,23 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
     const twoHoursAfterEnd = moment(new Date(endTime*1000)).add(2, 'hours');
 
     // Get max distance and price from all data without limit
+    // AN EMPTY distanceQuery IS NOT A NO-OP — it is invalid SQL.
+    //
+    // With neither geo nor a resolvable city there is nothing to measure from,
+    // and `distanceQuery` stays ''. Interpolated, that produced `MAX()` and
+    // `() AS distance`, so an unfiltered GET /vehicle answered with a raw MySQL
+    // syntax error. Distance is simply absent in that case.
+    const maxAttributes = [
+      [Sequelize.fn('MAX', Sequelize.literal(discountedFeeQuery)), 'maxPrice'],
+    ];
+    if (distanceQuery) {
+      maxAttributes.unshift([Sequelize.fn('MAX', Sequelize.literal(distanceQuery)), 'maxDistance']);
+    }
+
     const maxValues = await Vehicle.findOne({
       where: whereClause,
       include: includeOptions,
-      attributes: [
-        [Sequelize.fn('MAX', Sequelize.literal(distanceQuery)), 'maxDistance'],
-        [Sequelize.fn('MAX', Sequelize.literal(discountedFeeQuery)), 'maxPrice']
-      ],
+      attributes: maxAttributes,
       raw: true
     });
 
@@ -192,16 +236,18 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
         // `order` is an array of order items; spread it so it isn't nested as a
         // single element (which made Sequelize emit ``.`vehicle`.`col` -> the
         // "Incorrect database name ''" error).
-        ...(sortBy === 'distance'
+        // `sortBy=distance` with no geo/city would emit a bare ' ASC'.
+        ...(distanceQuery && sortBy === 'distance'
           ? [Sequelize.literal(`${distanceQuery} ASC`)]
-          : sortBy === '-distance'
+          : distanceQuery && sortBy === '-distance'
           ? [Sequelize.literal(`${distanceQuery} DESC`)]
           : order)
       ],
       include: includeOptions,
       attributes: {
         include: [
-          [Sequelize.literal(`(${distanceQuery})`), 'distance'],
+          // Omitted entirely without a distance basis — `()` is a syntax error.
+          ...(distanceQuery ? [[Sequelize.literal(`(${distanceQuery})`), 'distance']] : []),
           [Sequelize.literal(`
             (
                 CASE 

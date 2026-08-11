@@ -10,16 +10,12 @@ const PanCard = db.define('panCard', {
   // Name as printed on the card — frequently differs from the account name,
   // which is precisely what a reviewer needs to see.
   holderName: { type: DataTypes.STRING },
-  // Front of the card — kept as the legacy name, exactly like kycDocument's.
-  // The number and the printed name are both on this face, so it is the only
-  // one OCR reads (see SCANNED_KINDS.pan in onboardingDocumentService).
+  // A PAN card is SINGLE-FACED for our purposes: the number and the printed
+  // name are both on the front, and the back carries nothing we read or review.
+  // A `backImageKey` was added and then removed — don't reintroduce it without
+  // a reason to look at the back, and note that removing it again would mean
+  // another destructive alter-sync.
   imageKey: { type: DataTypes.STRING },
-  // Back of the card. Carries no data we extract, but a reviewer needs it: it
-  // is where a tampered or laminated-over card shows, and every other identity
-  // document in this system is captured both faces. Nullable — every PAN
-  // submitted before this column existed has a front and nothing else, and
-  // those rows must keep reading cleanly.
-  backImageKey: { type: DataTypes.STRING },
 
   status: {
     type: DataTypes.ENUM,
