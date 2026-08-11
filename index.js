@@ -111,9 +111,20 @@ process.on('uncaughtException', (err) => {
 // every model after the failure point never gets its table — that is exactly
 // how "Table 'railway.settlements' doesn't exist" happens at runtime while the
 // server appears healthy. Fail loudly instead.
-const dbReady = db.sync({alter:true})
-  .then(() => console.log('Schema sync done.'))
+// Classify the connection BEFORE sync. `Unknown database 'cocarr_core'` is a
+// completely different problem from a partial alter-sync, and reporting it as
+// the latter sends whoever reads the log looking for a bad model. Never throws.
+const { preflight } = require('./src/configs/dbPreflight');
+
+const dbReady = preflight(db, console)
+  .then(({ ok }) => {
+    // Skip the sync when the database is unreachable: it can only produce a
+    // noisier version of the error already reported.
+    if (!ok) return Promise.reject(new Error('database unreachable'));
+    return db.sync({alter:true}).then(() => console.log('Schema sync done.'));
+  })
   .catch((err) => {
+    if (err.message === 'database unreachable') return; // already reported above
     console.error('!!! SCHEMA SYNC FAILED — tables may be missing !!!');
     console.error(err?.parent?.sqlMessage || err?.message || err);
     console.error('Run `node scripts/syncNewTables.js` to create missing tables without a full alter.');
