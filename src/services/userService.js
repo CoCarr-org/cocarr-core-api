@@ -160,11 +160,66 @@ async function verifyOtp(data) {
       }
       else
       {
-        let firebaseUserInfo = await userAuth.createUser({phoneNumber:`+91${data.mobile}`});
+        // FIREBASE IS THE SOURCE OF TRUTH FOR AUTH; the `users` row is our
+        // projection of it. Those two can legitimately disagree, and when they
+        // do it is always in this direction: an account exists in Firebase and
+        // we have no row for it.
+        //
+        // Reaching here means no `users` row matched this phone number, so the
+        // old code went straight to createUser — which Firebase REFUSES with
+        // `auth/phone-number-already-exists` if it already knows the number.
+        // The result is an account that can never sign in again, because every
+        // future attempt takes this same branch and fails the same way.
+        //
+        // That is not an edge case. It happens to EVERY existing user the
+        // moment the database is rebuilt or restored from before they signed
+        // up — the platform has no Firebase->DB backfill (it was removed
+        // deliberately), so the rows are gone while the Firebase accounts
+        // remain. It also happens whenever a `users` row is deleted by hand.
+        //
+        // So: adopt the existing Firebase account instead of failing. This is
+        // NOT the bulk sync that was removed — nothing is enumerated, and it
+        // only ever runs for somebody who has just proved they control this
+        // phone number by passing the OTP check above.
+        let firebaseUserInfo;
+        try {
+          firebaseUserInfo = await userAuth.createUser({phoneNumber:`+91${data.mobile}`});
+        } catch (createErr) {
+          if (createErr?.code !== 'auth/phone-number-already-exists') throw createErr;
+          firebaseUserInfo = await userAuth.getUserByPhoneNumber(`+91${data.mobile}`);
+          console.log(`[verify-otp] adopting existing Firebase account ${firebaseUserInfo.uid} for +91${data.mobile} — no users row existed`);
+        }
         const transaction = await db.transaction()
         try {
-          let userInfo = await User.create({id:firebaseUserInfo.uid,contactNumber:`+91${data.mobile}`,contactVerified:true},{transaction})
-          await Wallet.create({userId:userInfo.id},{transaction})
+          // findOrCreate, not create: the lookup above matched on
+          // contactNumber, so a row stored under this uid with the number in a
+          // different shape (no +91, spaces) would collide on the primary key
+          // and throw instead of signing the user in. Whatever is on the row
+          // wins; this call only fills a gap.
+          const [userInfo] = await User.findOrCreate({
+            where: { id: firebaseUserInfo.uid },
+            defaults: { id: firebaseUserInfo.uid, contactNumber: `+91${data.mobile}`, contactVerified: true },
+            transaction,
+          })
+          // Same reasoning — an adopted account may already have a wallet.
+          await Wallet.findOrCreate({ where: { userId: userInfo.id }, defaults: { userId: userInfo.id }, transaction })
+
+          // A row reached through the uid was NOT seen by the contactNumber
+          // lookup above, so it never passed that branch's suspension check.
+          // Without this, storing the number in a different shape would be a
+          // way for a suspended account to sign in — the one thing suspension
+          // exists to stop.
+          // Throw only — the catch below owns the rollback. Rolling back here
+          // too would make Sequelize throw on the finished transaction and
+          // replace this 403 with an unrelated 500.
+          if (userInfo.verificationStatus === 'suspended') {
+            throw new CustomError(
+              userInfo.suspensionReason
+                ? `Your account has been suspended: ${userInfo.suspensionReason}`
+                : 'Your account has been suspended. Please contact support.',
+              403,
+            )
+          }
           await transaction.commit()
 
           // The new account does NOT get a referral code yet — a code is minted
