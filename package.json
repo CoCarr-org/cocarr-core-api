@@ -12,7 +12,8 @@
     "migrate:down": "node scripts/migrate.js down",
     "migrate:check": "node scripts/migrate.js pending",
     "db:ensure": "node scripts/ensureDatabase.js",
-    "db:diff": "node scripts/diffSchema.js"
+    "db:diff": "node scripts/diffSchema.js",
+    "diagnose:listings": "node scripts/diagnoseListings.js"
   },
   "author": "rimor tech",
   "license": "ISC",
