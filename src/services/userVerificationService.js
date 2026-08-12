@@ -3,6 +3,7 @@ const User = require('../models/user');
 const { matchAgainstProfile } = require('./nameMatchService');
 const { logActivity } = require('./activityLogService');
 const documentStore = require('./documentStoreService');
+const { isProviderBypassEnabled } = require('../utils/verificationBypass');
 const referralService = require('./referralService');
 const walletService = require('./walletService');
 
@@ -340,6 +341,18 @@ async function getStatus(userId) {
     reviewedAt: user.verificationReviewedAt,
     isSearchable: user.isSearchable,
     canSubmit: check.profileComplete && ['incomplete', 'rejected'].includes(user.verificationStatus),
+    // ── The development bypass, told to the client ──
+    //
+    // Both wizards already call this endpoint, so the flag rides along rather
+    // than needing a second request on every screen that cares. The clients use
+    // it for ONE thing: not showing an OTP box when no OTP is going to be sent.
+    // They never use it to decide whether something is verified — that is the
+    // server's answer and stays on the document rows.
+    //
+    // Absent from an older server's response reads as `undefined`, which is
+    // falsy, so a client talking to a server that predates this gets the real
+    // flow. That is the correct failure direction.
+    providerBypass: await isProviderBypassEnabled(),
     profileComplete: check.profileComplete,
     missing: check.missing,
     missingProfile: check.missingProfile,
@@ -681,6 +694,35 @@ async function approve(userId, admin) {
   if (unverified.length) {
     throw badRequest(
       `Verify every document before approving. Outstanding: ${unverified.join(', ')}`,
+    );
+  }
+
+  // ── KYC IS A SECOND, DIFFERENT GATE ────────────────────────────────────────
+  //
+  // Document verification and KYC answer different questions, and a profile
+  // needs BOTH before it can go active:
+  //
+  //   document verification — an admin looked at the scan and it is a real,
+  //                           legible Aadhaar whose details match the profile.
+  //                           It says nothing about who is holding it.
+  //   KYC                   — the person controls the mobile number registered
+  //                           against that Aadhaar. That is the identity proof,
+  //                           and no amount of looking at a photograph is a
+  //                           substitute for it.
+  //
+  // So a scan can be approved by an admin — genuinely, carefully — for somebody
+  // holding a photo of someone else's card. `referenceId` is written ONLY by a
+  // successful OTP verification, which is why it is what this checks rather than
+  // any status an admin can set.
+  //
+  // The bypass does not weaken this: a bypassed run still writes referenceId,
+  // because with the provider unreachable the alternative is that nothing can be
+  // approved at all in a development environment.
+  if (!kycDoc.referenceId) {
+    throw badRequest(
+      'KYC is not verified for this profile. The Aadhaar scan has been reviewed, but the '
+      + 'holder has not proved control of the registered mobile number. Run the KYC check '
+      + 'before approving.',
     );
   }
 
