@@ -35,6 +35,7 @@ const { createRazorpayLinkedAccount } = require('./paymentGatewayService');
 const imageService = require('./imageService');
 const { kycHttp } = require('../utils/kycHttp');
 const { getSignature } = require("../utils/signature");
+const { personName } = require('../utils/userDisplayName');
 
 const createHost = async (hostData) => {
   const transaction = await db.transaction();
@@ -42,9 +43,19 @@ const createHost = async (hostData) => {
     const userInfo = await User.findOne({ where: { id: hostData.userId } });
     if (!userInfo) throw new CustomError('User not found', 404);
     
+    // `userInfo.name` ALONE IS NULL FOR ALMOST EVERY USER. It is only populated
+    // for accounts that arrived with a Firebase displayName; the OTP signup flow
+    // writes nothing but a phone number and the onboarding wizard then fills
+    // `firstName`/`lastName` and never touches `name`. Copying `name` therefore
+    // created every host with a blank one, which is what the ops panel was
+    // rendering as "Unnamed host". See utils/userDisplayName.js.
+    //
+    // `personName`, not `displayName`: a null here is honest and gets filled in
+    // by the onboarding hook later, whereas a phone number in the name column
+    // looks like a value and would never be corrected.
     const host = await Host.create({
       userId: hostData.userId,
-      name: userInfo.name,
+      name: personName(userInfo),
       email: userInfo.email,
       contactNumber: userInfo.contactNumber,
       countryCode: userInfo.countryCode

@@ -14,7 +14,15 @@
 // Order: the onboarded name, then the Firebase one, then email, then the phone
 // number. The phone is a last resort but it is what support will actually
 // search by, so it beats a placeholder.
-const displayName = (user) => {
+// The part of the above that is actually a NAME — no email, no phone number.
+//
+// `displayName` falls back to contact details so a screen always has something
+// to print, which is right for rendering and wrong for STORING. A denormalised
+// `name` column filled with a phone number is worse than an empty one: it reads
+// as a real value, so nothing ever goes back and fixes it, and every screen
+// shows a number where a name belongs. Callers that WRITE a name use this and
+// leave the column null when there is genuinely no name yet.
+const personName = (user) => {
   if (!user) return null;
   const composed = [user.firstName, user.lastName]
     .filter((part) => part && String(part).trim())
@@ -22,6 +30,13 @@ const displayName = (user) => {
     .trim();
   if (composed) return composed;
   if (user.name && String(user.name).trim()) return String(user.name).trim();
+  return null;
+};
+
+const displayName = (user) => {
+  if (!user) return null;
+  const named = personName(user);
+  if (named) return named;
   if (user.email && String(user.email).trim()) return String(user.email).trim();
   if (user.contactNumber && String(user.contactNumber).trim()) return String(user.contactNumber).trim();
   return null;
@@ -36,4 +51,4 @@ const displayNameOr = (user, fallback = 'Unnamed user') => displayName(user) || 
 // accidentally select too few and silently fall through to the phone number.
 const DISPLAY_NAME_ATTRIBUTES = ['firstName', 'lastName', 'name', 'email', 'contactNumber'];
 
-module.exports = { displayName, displayNameOr, DISPLAY_NAME_ATTRIBUTES };
+module.exports = { displayName, displayNameOr, personName, DISPLAY_NAME_ATTRIBUTES };
