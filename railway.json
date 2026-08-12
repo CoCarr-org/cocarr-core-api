@@ -6,7 +6,7 @@
   },
   "deploy": {
     "startCommand": "node index.js",
-    "preDeployCommand": "npm run db:bootstrap && npm run migrate:up",
+    "preDeployCommand": "npm run release",
     "numReplicas": 1,
     "healthcheckPath": "/v1/health",
     "restartPolicyType": "ON_FAILURE",
