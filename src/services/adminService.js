@@ -409,39 +409,71 @@ const verifyLicense = async (userId)=> {
 }
 
 
-const getSchedules = async ({userId, vehicleId, sort='createdAt', offset=0, limit=10, status, hostId, searchTerm})=>{
+// Sortable columns on `schedules`. `sort` came straight off the query string
+// and went into ORDER BY untouched, so any value that is not a column is a
+// 500 — and one that is a column of another table is worse, because it is a
+// caller choosing what we sort by.
+const SCHEDULE_SORTABLE = ['createdAt', 'updatedAt', 'startTime', 'endTime', 'status'];
+
+const getSchedules = async ({vehicleId, sort='createdAt', offset=0, limit=10, status, hostId, searchTerm})=>{
   try {
     const whereClause = {};
-    
-    // Add filters to where clause if provided
-    if (userId) whereClause.userId = userId;
+
+    // ONLY REAL COLUMNS. `schedules` has exactly vehicleId, startTime, endTime,
+    // status and deleted — the previous version also applied `userId` and
+    // `hostId` to this where clause, neither of which exists on the table, so
+    // passing either produced `Unknown column` and a 500. `hostId` is a real
+    // question though, so it is answered through the vehicle instead (below).
     if (vehicleId) whereClause.vehicleId = vehicleId;
     if (status) whereClause.status = status;
-    if (hostId) whereClause.hostId = hostId;
 
-    // Add search functionality
-    if (searchTerm) {
-      whereClause[Op.or] = [
-        { vehicleName: { [Op.like]: `%${searchTerm}%` } },
-        { location: { [Op.like]: `%${searchTerm}%` } }
+    // SEARCH USED TO GUARANTEE A 500. It filtered `vehicleName` and `location`
+    // on the SCHEDULES table, which has neither column, so any search term at
+    // all threw `Unknown column 'vehicleName' in 'where clause'`. Those fields
+    // live on the vehicle, so the match belongs on the vehicle include — and
+    // `vehicleNumber` is added because a registration number is what an ops
+    // admin has in front of them.
+    const term = String(searchTerm || '').trim();
+    const vehicleWhere = {};
+    if (term) {
+      vehicleWhere[Op.or] = [
+        { vehicleName: { [Op.like]: `%${term}%` } },
+        { vehicleNumber: { [Op.like]: `%${term}%` } },
       ];
     }
+    if (hostId) vehicleWhere.hostId = hostId;
 
-    // Get total count for pagination
-    const total = await Schedule.count({ where: whereClause });
+    // `required` is inferred by Sequelize from the PRESENCE of a `where` key,
+    // not from whether it constrains anything — so this must stay conditional.
+    // An unconditional `where: {}` would turn the join INNER and silently drop
+    // every schedule whose vehicle row is missing. Same trap that emptied the
+    // vehicles list.
+    const narrowed = Boolean(term || hostId);
 
-    // Get paginated and sorted results
+    const vehicleInclude = {
+      model: Vehicle,
+      as: 'vehicle',
+      attributes: ['id', 'vehicleName', 'vehicleBrand', 'vehicleType', 'vehicleNumber', 'hostId'],
+      ...(narrowed ? { where: vehicleWhere, required: true } : { required: false }),
+    };
+
+    const order = [[SCHEDULE_SORTABLE.includes(sort) ? sort : 'createdAt', 'DESC']];
+
+    // Counted through the SAME include, or the total disagrees with the rows
+    // whenever a search is applied — which is what drives the pager.
+    const total = await Schedule.count({
+      where: whereClause,
+      include: [vehicleInclude],
+      distinct: true,
+    });
+
     const schedules = await Schedule.findAll({
       where: whereClause,
-      order: [[sort, 'DESC']],
+      order,
       offset: parseInt(offset),
       limit: parseInt(limit),
       include: [
-        {
-          model: Vehicle,
-          as:'vehicle',
-          attributes: ['vehicleName', 'vehicleBrand', 'vehicleType','vehicleNumber']
-        },
+        vehicleInclude,
         {
           model:ScheduleBlock,
           as:'scheduleBlocks',
@@ -472,8 +504,15 @@ const getScheduleById = async (id)=>{
           attributes:['startTime','endTime','status']
         },
         {
+          // `as` IS REQUIRED, AND ITS ABSENCE MADE THIS ENDPOINT 500 FOR EVERY
+          // ID. The association is declared `Schedule.belongsTo(Vehicle, { as:
+          // 'vehicle' })`, and an include with no alias does not match an
+          // aliased association — Sequelize throws `Vehicle is not associated
+          // to schedule!` before the query is built. Nothing in the panel
+          // called this route, so it went unnoticed.
           model:Vehicle,
-          attributes:['vehicleName','vehicleBrand','vehicleType']
+          as:'vehicle',
+          attributes:['id','vehicleName','vehicleBrand','vehicleType','vehicleNumber','hostId']
         }
       ]
     })

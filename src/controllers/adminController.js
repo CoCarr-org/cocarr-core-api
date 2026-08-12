@@ -213,8 +213,16 @@ const rejectVehicle = async (req, res) => {
 
 const getSchedules = async (req, res) => {
   try {
-    const {vehicleId,sort,offset,limit,status,hostId} = req.query
-    const availability = await adminService.getSchedules({userId:req.body.userId,vehicleId,sort,offset,limit,status,hostId});
+    // `searchTerm` was never read off the query, so the service's search branch
+    // was unreachable from HTTP — which is the only reason its broken column
+    // list never surfaced as a 500 in production.
+    //
+    // `userId` is dropped: this is an admin route behind `authenticateAdmin`,
+    // which never populates `req.body.userId` (that is `authenticateUser`'s
+    // doing), so it was always undefined — and `schedules` has no such column
+    // to filter on anyway.
+    const {vehicleId,sort,offset,limit,status,hostId,searchTerm} = req.query
+    const availability = await adminService.getSchedules({vehicleId,sort,offset,limit,status,hostId,searchTerm});
     res.json(availability);
   } catch (error) {
     res.status(400).json({ error: error.message });
