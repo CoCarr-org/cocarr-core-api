@@ -202,7 +202,9 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
       {
         model:Host,
         as:'host',
-        where:hostId ? {id:hostId} : undefined
+        // Explicit, because Sequelize infers `required` from the PRESENCE of a
+        // `where` key. Only narrow to one host when actually filtering by one.
+        ...(hostId ? { where: { id: hostId }, required: true } : { required: false }),
       },
       {
         model: VehiclePlan,
@@ -214,7 +216,26 @@ const getAllVehicles = async ({searchTerm,  sortBy='vehicleName', filters, start
       {
         model: Pickup,
         as: 'pickupPoint',
-        where: filters && filters.city ? { cityId: filters.city } : {},
+        // THIS IS WHY THE OPS VEHICLES LIST CAME BACK EMPTY.
+        //
+        // The old code passed `where: {}` when there was no city filter. An
+        // empty object is still an object, and Sequelize decides `required`
+        // from whether a `where` key is PRESENT, not whether it constrains
+        // anything — so `{}` silently turned this into an INNER JOIN and every
+        // vehicle without a pickup row disappeared from the list.
+        //
+        // Vehicles get their pickup progressively (the listing wizard's
+        // Location step; see `isPickupAdded` in hostService), so a car that is
+        // mid-listing or was never given a location has no `pickups` row at
+        // all. Those are exactly the vehicles ops needs to see — a car in
+        // review is the reason to open this screen.
+        //
+        // So: LEFT JOIN by default, and only INNER JOIN when a city filter is
+        // genuinely being applied, where excluding pickup-less vehicles is the
+        // intended meaning.
+        ...(filters && filters.city
+          ? { where: { cityId: filters.city }, required: true }
+          : { required: false }),
         include:[{model:City,as:'city',required:false}]
       }
     ];
