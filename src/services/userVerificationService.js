@@ -4,6 +4,7 @@ const { matchAgainstProfile } = require('./nameMatchService');
 const { logActivity } = require('./activityLogService');
 const documentStore = require('./documentStoreService');
 const { isProviderBypassEnabled } = require('../utils/verificationBypass');
+const verificationSections = require('./verificationSections');
 const referralService = require('./referralService');
 const walletService = require('./walletService');
 
@@ -684,47 +685,19 @@ async function approve(userId, admin) {
     );
   }
 
-  const { kyc: kycDoc, licence: licenceDoc } = await documentStore.getAllForUser(userId);
-  const unverified = [];
-  if (!kycDoc) unverified.push('Aadhaar (not submitted)');
-  else if (kycDoc.status !== 'verified') unverified.push(`Aadhaar (${kycDoc.status})`);
-  if (!licenceDoc) unverified.push('Driving licence (not submitted)');
-  else if (licenceDoc.status !== 'verified') unverified.push(`Driving licence (${licenceDoc.status})`);
-
-  if (unverified.length) {
-    throw badRequest(
-      `Verify every document before approving. Outstanding: ${unverified.join(', ')}`,
-    );
-  }
-
-  // ── KYC IS A SECOND, DIFFERENT GATE ────────────────────────────────────────
+  // ── THE USER CHAIN, AND ONLY THE USER CHAIN ──────────────────────────────
   //
-  // Document verification and KYC answer different questions, and a profile
-  // needs BOTH before it can go active:
+  // Aadhaar doc + driving licence doc + KYC check + photo/identity match. The
+  // four are defined in verificationSections.js so this gate, the ops screen and
+  // any future caller read the same list — a gate that hardcodes its own
+  // conditions is how the screen and the server end up disagreeing about why a
+  // button is disabled.
   //
-  //   document verification — an admin looked at the scan and it is a real,
-  //                           legible Aadhaar whose details match the profile.
-  //                           It says nothing about who is holding it.
-  //   KYC                   — the person controls the mobile number registered
-  //                           against that Aadhaar. That is the identity proof,
-  //                           and no amount of looking at a photograph is a
-  //                           substitute for it.
-  //
-  // So a scan can be approved by an admin — genuinely, carefully — for somebody
-  // holding a photo of someone else's card. `referenceId` is written ONLY by a
-  // successful OTP verification, which is why it is what this checks rather than
-  // any status an admin can set.
-  //
-  // The bypass does not weaken this: a bypassed run still writes referenceId,
-  // because with the provider unreachable the alternative is that nothing can be
-  // approved at all in a development environment.
-  if (!kycDoc.referenceId) {
-    throw badRequest(
-      'KYC is not verified for this profile. The Aadhaar scan has been reviewed, but the '
-      + 'holder has not proved control of the registered mobile number. Run the KYC check '
-      + 'before approving.',
-    );
-  }
+  // Nothing here consults the host or vehicle chains. Riding asks who you are
+  // and whether you may drive; being paid asks for a tax identity and an
+  // account. A rider was never meant to wait on either.
+  const chain = await verificationSections.chainState('user', userId);
+  verificationSections.assertChainComplete(chain, 'Approving a profile');
 
   const previous = user.verificationStatus;
   await user.update({

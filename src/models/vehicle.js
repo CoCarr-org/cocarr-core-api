@@ -201,6 +201,31 @@ const Vehicle = db.define('vehicle', {
   // vehicleService gate on that boolean — but it cannot express "rejected",
   // which is why counts of `isAdminApproved: false` used to mean "pending" and
   // would otherwise have silently started including rejected vehicles.
+  // ── The host's own photos of the car, reviewed ────────────────────────────
+  //
+  // Separate from the physical verification, and both are needed. These are the
+  // photos the LISTING shows — the ones a rider decides on. They can be honest
+  // pictures of the right car and still be unusable: someone else's stock shot,
+  // a night photo of a number plate, three angles of the same door. The
+  // physical check answers "does this car exist and is this the host"; this one
+  // answers "is what a rider will see a fair representation of it".
+  //
+  // Nothing reviewed them before, so a car went live on whatever was uploaded.
+  photosStatus: {
+    type: DataTypes.ENUM('pending', 'verified', 'rejected'),
+    allowNull: false,
+    defaultValue: 'pending',
+  },
+  photosReason: {
+    type: DataTypes.TEXT,
+  },
+  photosReviewedAt: {
+    type: DataTypes.DATE,
+  },
+  photosReviewedByAdminId: {
+    type: DataTypes.UUID,
+  },
+
   approvalStatus:{
     type: DataTypes.ENUM,
     // `maintenance` = a damaged / under-repair car taken off the platform
