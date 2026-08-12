@@ -23,8 +23,13 @@ const createRazorpayLinkedAccount = async (hostData, bankData, accountNumber, if
   try {
     // Step 1: Create Linked Account
     // Extract the 6 digit pincode from bankData.address if available
+    // `ifsc_details` IS NOT GUARANTEED. Cashfree omits it when the IFSC lookup
+    // returns nothing, so the unguarded `.address` below threw a TypeError —
+    // and because this ran before the payout row was created, that TypeError
+    // discarded the host's whole submission. Optional-chained; a missing
+    // address is a missing address, not a crash.
     let extractedPincode = null;
-    if (bankData.ifsc_details.address) {
+    if (bankData?.ifsc_details?.address) {
       const match = bankData.ifsc_details.address.match(/\b\d{6}\b/);
       if (match && match[0]) {
         extractedPincode = match[0];
@@ -32,7 +37,7 @@ const createRazorpayLinkedAccount = async (hostData, bankData, accountNumber, if
     }
 
     // Handle street1/street2 max 100 character logic
-    let addressRaw = bankData.ifsc_details.address || 'Not provided';
+    let addressRaw = bankData?.ifsc_details?.address || 'Not provided';
     let street1, street2;
     if (addressRaw.length > 100) {
       street1 = addressRaw.slice(0, 100);

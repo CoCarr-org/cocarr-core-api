@@ -223,19 +223,25 @@ const createHostPayoutBankAccount = async (hostId, data) => {
       gstNumber: host.gstNumber || null
     };
 
-    // Create Razorpay linked account with Route configuration
-    const razorpayAccount = await createRazorpayLinkedAccount(
-      hostData,
-      kycResponse.data,
-      data.accountNumber,
-      data.ifscCode
-    );
-
     // Extract last 4 digits of account number
     const last4Digits = data.accountNumber.slice(-4);
 
-    // Create Host Payout Account with only last 4 digits
-    return await HostPayoutAccount.create({
+    // SAVE FIRST, LINK SECOND. THE ORDER WAS THE OTHER WAY AND IT LOST DATA.
+    //
+    // `createRazorpayLinkedAccount` was awaited BEFORE this row was created, and
+    // it throws on every failure path — Route not enabled on the merchant
+    // account, a stakeholder or product-config rejection, and a plain
+    // TypeError when Cashfree's response carries no `ifsc_details`. Any of
+    // those discarded the host's bank details ENTIRELY, after we had already
+    // paid for a real verification against them. The host was told "try again"
+    // and had to re-enter and re-verify, with nothing to show they had ever
+    // submitted. That is exactly the state dev is in: a host, a verified
+    // identity, and zero rows in hostPayoutAccounts.
+    //
+    // The bank details are OURS and the verification is the thing worth
+    // keeping. The gateway linkage is a downstream integration that can be
+    // retried, so it must not be able to destroy the record it decorates.
+    const account = await HostPayoutAccount.create({
       hostId: host.id,
       accountNumber: last4Digits, // Only store last 4 digits
       accountHolderName: kycResponse.data.name_at_bank,
@@ -251,10 +257,34 @@ const createHostPayoutBankAccount = async (hostId, data) => {
       nameMatchScore: kycResponse.data.name_match_score,
       nameMatchStatus: kycResponse.data.name_match_status,
       hostProvidedName: data.hostProvidedName,
-      razorpayContactId: razorpayAccount.linkedAccountId, // Store linked account ID
-      razorpayFundAccountId: razorpayAccount.stakeholderId, // Store stakeholder ID
       isActive: true
     });
+
+    // Best effort, and deliberately not fatal. An unlinked account cannot be
+    // PAID (settlement resolves the gateway ids), which is the correct
+    // consequence — but it is a retryable state with the details on file, not
+    // a lost submission. The failure is logged loudly because nothing else
+    // surfaces it yet.
+    try {
+      const razorpayAccount = await createRazorpayLinkedAccount(
+        hostData,
+        kycResponse.data,
+        data.accountNumber,
+        data.ifscCode
+      );
+      await account.update({
+        razorpayContactId: razorpayAccount.linkedAccountId,
+        razorpayFundAccountId: razorpayAccount.stakeholderId,
+      });
+    } catch (linkError) {
+      console.error(
+        `[payout] Bank account ${account.id} saved and VERIFIED, but the Razorpay linked account failed: `
+        + `${linkError?.message || linkError}. Payouts to this host are blocked until it is linked; `
+        + 'the host does NOT need to re-enter their details.',
+      );
+    }
+
+    return account;
   } catch (error) {
     throw new CustomError(error.message, error.statusCode || 400);
   }
