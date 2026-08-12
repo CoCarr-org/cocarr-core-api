@@ -12,6 +12,7 @@
     "migrate:down": "node scripts/migrate.js down",
     "migrate:check": "node scripts/migrate.js pending",
     "db:ensure": "node scripts/ensureDatabase.js",
+    "db:bootstrap": "node scripts/ensureDatabase.js --bootstrap",
     "db:diff": "node scripts/diffSchema.js",
     "diagnose:listings": "node scripts/diagnoseListings.js"
   },
@@ -52,5 +53,8 @@
   "devDependencies": {
     "nodemon": "^3.0.1",
     "sequelize-cli": "^6.6.2"
+  },
+  "config": {
+    "expectedDbName": "cocarr_core"
   }
 }
