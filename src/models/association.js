@@ -159,3 +159,31 @@ Referral.belongsTo(ReferralCampaign, { foreignKey: 'campaignId', as: 'campaign' 
 Referral.hasMany(ReferralReward, { foreignKey: 'referralId', as: 'rewards' });
 ReferralReward.belongsTo(Referral, { foreignKey: 'referralId', as: 'referral' });
 ReferralReward.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// ── Keeping the host row's copy of the user's identity truthful ──
+//
+// `hosts` denormalises name/email/contactNumber off the user. That copy was
+// written once at become-a-host time and never again, so a name entered or
+// corrected during onboarding — which for most people happens AFTER they list
+// their first car — never reached it. The ops panel then showed "Unnamed host"
+// about someone whose name was in the user row all along.
+//
+// A HOOK, NOT A CALL AT EACH WRITE SITE. There are four places a user's name or
+// contact details change today (userService.updateInfo / updateProfile /
+// updateMobile, userVerificationService.saveProfile) and the next one will be
+// added by somebody who has never heard of the host row. A hook cannot be
+// forgotten. Nothing does a bulk `User.update(...)` on these fields, so
+// `afterUpdate` sees every change; if that ever changes, the bulk call needs
+// `individualHooks: true` or it will bypass this silently.
+//
+// Guarded on `changed()` so the ordinary user update — a profile photo, a
+// verification status, a wallet-adjacent flag — costs nothing at all.
+const { syncHostIdentity, MIRRORED_USER_FIELDS } = require('../services/hostIdentityService');
+
+User.addHook('afterUpdate', 'syncHostIdentity', async (user) => {
+  const changed = user.changed();
+  if (!changed || !changed.some((field) => MIRRORED_USER_FIELDS.includes(field))) return;
+  // Never throws — see hostIdentityService. A profile save must not fail
+  // because the host row could not be brought along.
+  await syncHostIdentity(user);
+});
