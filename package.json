@@ -13,6 +13,7 @@
     "migrate:check": "node scripts/migrate.js pending",
     "db:ensure": "node scripts/ensureDatabase.js",
     "db:bootstrap": "node scripts/ensureDatabase.js --bootstrap",
+    "release": "npm run db:bootstrap && npm run migrate:up",
     "db:diff": "node scripts/diffSchema.js",
     "diagnose:listings": "node scripts/diagnoseListings.js"
   },
