@@ -19,7 +19,6 @@ const db = require('../configs/db');
 const documentStore = require('./documentStoreService');
 const KycDocument = require('../models/kycDocument');
 const PanCard = require('../models/panCard');
-const DrivingLicence = require('../models/drivingLicence');
 const { default: axios } = require('axios');
 const VehiclePreference = require('../models/vehiclePreference');
 const { BOOKING_FINISHED, BOOKING_INITIATED, BOOKING_BOOKED, BOOKING_CANCELLED, BOOKING_ONGOING } = require('../configs/constants');
@@ -83,8 +82,21 @@ const HOST_SORTABLE = ['createdAt', 'updatedAt', 'name', 'email', 'contactNumber
 // Per-page verification summary for a set of hosts, resolved from the USER's
 // documents (see getHostById for why the host's own kyc* columns are dead).
 //
-// One query per document type for the whole page rather than three per host —
-// a list of 25 costs 3 queries, not 75. Only `isCurrent` rows are considered,
+// A HOST'S KYC IS AADHAAR + PAN. THE DRIVING LICENCE IS NOT PART OF IT, and it
+// is no longer resolved here.
+//
+// A host lists a car; they do not drive it. The licence is what lets somebody
+// BOOK — it belongs to the rider side of the same person's profile and is
+// reviewed on the user screens, where the scans and the registry verdict are.
+// Aadhaar establishes who the host is; PAN is the tax requirement for PAYING
+// them, so a missing PAN is why a payout is stuck — which is the question ops
+// actually arrives at this screen with. A licence answers nothing about either.
+//
+// Nothing rendered `licenceStatus` (the hosts list has only ever shown KYC and
+// PAN pills), so this removes a query per page rather than a feature.
+//
+// One query per document type for the whole page rather than one per host — a
+// list of 25 costs 2 queries, not 50. Only `isCurrent` rows are considered,
 // which is the same rule documentStore.getCurrent applies: a superseded
 // submission must not decide the badge.
 async function attachVerificationSummary(hosts) {
@@ -94,14 +106,13 @@ async function attachVerificationSummary(hosts) {
 
   const where = { userId: { [Op.in]: userIds }, isCurrent: true };
   const pick = ['userId', 'status'];
-  const [kyc, pan, licence] = await Promise.all([
+  const [kyc, pan] = await Promise.all([
     KycDocument.findAll({ where, attributes: pick }),
     PanCard.findAll({ where, attributes: pick }),
-    DrivingLicence.findAll({ where, attributes: pick }),
   ]);
 
   const index = (list) => Object.fromEntries(list.map((d) => [d.userId, d.status]));
-  const byUser = { kyc: index(kyc), pan: index(pan), licence: index(licence) };
+  const byUser = { kyc: index(kyc), pan: index(pan) };
 
   // `null` means NOT SUBMITTED and is deliberately distinct from 'pending'.
   // Collapsing them would tell an admin somebody is awaiting review when they
@@ -112,7 +123,7 @@ async function attachVerificationSummary(hosts) {
       source: 'user',
       kycStatus: byUser.kyc[h.userId] ?? null,
       panStatus: byUser.pan[h.userId] ?? null,
-      licenceStatus: byUser.licence[h.userId] ?? null,
+      // No licenceStatus. A host's KYC is Aadhaar + PAN — see above.
     },
   }));
 }
