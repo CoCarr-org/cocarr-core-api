@@ -91,53 +91,66 @@ const documentSection = ({ key, label, type }) => ({
   },
 });
 
-// ── The KYC section: satisfied by the OTP, or by an admin saying so ────────
+// ── The KYC section: ALWAYS an ops decision ────────────────────────────────
 //
-// TWO WAYS IN, AND BOTH ARE LEGITIMATE.
+// THE OTP IS EVIDENCE, NOT A PASS.
 //
-//   the OTP passed        — `kycDocuments.referenceId` is written ONLY by a
-//                           successful Aadhaar OTP. That is the strongest proof
-//                           of identity the platform can get, and when it exists
-//                           this section needs no human at all.
-//   an admin verified it  — because the OTP cannot always run. A provider
-//                           outage, or `verification.providerBypass` on in a
-//                           development environment, leaves a user who has done
-//                           everything asked of them with no way to be
-//                           verified. Before this, nothing recorded that ops had
-//                           satisfied themselves some other way.
+// A successful Aadhaar OTP writes `kycDocuments.referenceId` and is the
+// strongest automatic proof the platform can get — but it does not verify this
+// section on its own, and nothing here activates an account. Ops looks at the
+// evidence and clicks Verify. That is the whole rule, and it holds in both
+// directions:
 //
-// A REJECTION OUTRANKS THE OTP. If an admin has actively rejected the KYC — a
-// suspected impersonation, a mismatch they can see and the machine cannot — a
-// passing OTP must not quietly override that judgement.
+//   OTP passed, ops has not clicked   → pending. Somebody still has to look.
+//   OTP never ran (provider outage,
+//   or providerBypass on), ops clicks → verified. A user who did everything
+//                                       asked of them is not stranded by our
+//                                       outage.
+//
+// This was previously auto-satisfied by the OTP, which meant a profile could
+// reach "every section verified" with no human having examined the identity at
+// all — the section existed but, on the ordinary path, nobody was ever asked.
+// An automatic pass in a chain whose entire purpose is a human decision is a
+// section that quietly is not one.
 const kycCheckSection = {
   key: 'kycCheck',
   label: 'KYC verification',
-  read: (ctx) => {
-    const user = ctx.user || ctx;
-    // AN EXPLICIT ADMIN DECISION WINS OUTRIGHT, and `kycCheckedAt` is how we
-    // know one was made — it is stamped on every write, including an unverify.
-    //
-    // Without this, an unverify would appear to do nothing: the status goes back
-    // to `pending`, `read` falls through to the OTP, the OTP has passed, and the
-    // section reports `verified` again. The admin presses the button, the row
-    // changes, and the screen does not — which reads as a broken button and is
-    // the reason nobody trusts them afterwards.
-    if (user?.kycCheckedAt) return user.kycCheckStatus || 'pending';
-    // No human has touched it, so the OTP answers on its own. This is the
-    // ordinary path and it needs no admin at all.
-    return ctx.documents?.kyc?.referenceId ? 'verified' : 'pending';
-  },
+  // ONE SOURCE: what ops decided. No fallback, so an unverify cannot be
+  // silently re-satisfied by the OTP on the next read.
+  read: (ctx) => (ctx.user || ctx)?.kycCheckStatus || 'pending',
   reasonOf: (ctx) => (ctx.user || ctx)?.kycCheckReason || null,
-  // Where the OTP already passed, an admin action is still recorded — it is how
-  // a rejection gets expressed, and how an unverify is undone afterwards.
+  // The evidence ops is deciding on, carried alongside the status so the screen
+  // can show WHY it is being asked rather than presenting a bare button.
+  evidenceOf: (ctx) => {
+    const user = ctx.user || ctx;
+    const kyc = ctx.documents?.kyc;
+    return {
+      otpVerified: !!kyc?.referenceId,
+      otpVerifiedAt: kyc?.otpVerifiedAt || null,
+      // The number the check is about. Masked elsewhere, but ops is the one
+      // audience that needs to see which Aadhaar is being verified.
+      kycNumber: kyc?.documentNumber || null,
+      // The number this section was verified AGAINST, snapshotted at the moment
+      // ops clicked. If the user later resubmits a different Aadhaar, these two
+      // disagree and the verification is stale — which is exactly the thing a
+      // reviewer would otherwise have no way to notice.
+      verifiedNumber: user?.kycCheckNumber || null,
+    };
+  },
   write: async (ctx, decision, admin, reasonText) => {
     const user = ctx.user || ctx;
     if (!user?.update) throw notFound('User not found for this KYC check');
+    const kycNumber = ctx.documents?.kyc?.documentNumber || null;
     await user.update({
       kycCheckStatus: stateFor(decision),
       kycCheckReason: decision === 'rejected' ? reasonText : null,
       kycCheckedAt: new Date(),
       kycCheckedByAdminId: admin?.id || null,
+      // RECORDED ON VERIFY, CLEARED OTHERWISE. Verifying is a statement about a
+      // specific Aadhaar number, so which one it was has to survive — otherwise
+      // "verified" is a claim with no object. Cleared on unverify/reject so a
+      // stale number cannot read as a current verification.
+      kycCheckNumber: decision === 'verified' ? kycNumber : null,
     });
   },
 };
@@ -323,6 +336,8 @@ async function chainState(subject, id, ctx = null) {
       label: s.label,
       status,
       reason: s.reasonOf(context) || null,
+      // Only some sections carry evidence for the reviewer to weigh.
+      evidence: s.evidenceOf ? s.evidenceOf(context) : null,
       // 'missing' means never submitted, and stays distinct from 'pending'
       // (submitted, awaiting a decision) everywhere in this platform: they call
       // for opposite actions — chase the person, or review what they sent.
