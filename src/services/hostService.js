@@ -16,6 +16,10 @@ const Schedule = require('../models/schedule');
 const ScheduleBlock = require('../models/scheduleBlock');
 const Damage = require('../models/damage');
 const db = require('../configs/db');
+const documentStore = require('./documentStoreService');
+const KycDocument = require('../models/kycDocument');
+const PanCard = require('../models/panCard');
+const DrivingLicence = require('../models/drivingLicence');
 const { default: axios } = require('axios');
 const VehiclePreference = require('../models/vehiclePreference');
 const { BOOKING_FINISHED, BOOKING_INITIATED, BOOKING_BOOKED, BOOKING_CANCELLED, BOOKING_ONGOING } = require('../configs/constants');
@@ -65,6 +69,43 @@ const createHost = async (hostData) => {
 // Sortable columns, so a client cannot put arbitrary text into ORDER BY.
 const HOST_SORTABLE = ['createdAt', 'updatedAt', 'name', 'email', 'contactNumber', 'status'];
 
+// Per-page verification summary for a set of hosts, resolved from the USER's
+// documents (see getHostById for why the host's own kyc* columns are dead).
+//
+// One query per document type for the whole page rather than three per host —
+// a list of 25 costs 3 queries, not 75. Only `isCurrent` rows are considered,
+// which is the same rule documentStore.getCurrent applies: a superseded
+// submission must not decide the badge.
+async function attachVerificationSummary(hosts) {
+  const rows = hosts.map((h) => (h.toJSON ? h.toJSON() : h));
+  const userIds = [...new Set(rows.map((h) => h.userId).filter(Boolean))];
+  if (!userIds.length) return rows;
+
+  const where = { userId: { [Op.in]: userIds }, isCurrent: true };
+  const pick = ['userId', 'status'];
+  const [kyc, pan, licence] = await Promise.all([
+    KycDocument.findAll({ where, attributes: pick }),
+    PanCard.findAll({ where, attributes: pick }),
+    DrivingLicence.findAll({ where, attributes: pick }),
+  ]);
+
+  const index = (list) => Object.fromEntries(list.map((d) => [d.userId, d.status]));
+  const byUser = { kyc: index(kyc), pan: index(pan), licence: index(licence) };
+
+  // `null` means NOT SUBMITTED and is deliberately distinct from 'pending'.
+  // Collapsing them would tell an admin somebody is awaiting review when they
+  // have not sent anything — two states, two different actions.
+  return rows.map((h) => ({
+    ...h,
+    verification: {
+      source: 'user',
+      kycStatus: byUser.kyc[h.userId] ?? null,
+      panStatus: byUser.pan[h.userId] ?? null,
+      licenceStatus: byUser.licence[h.userId] ?? null,
+    },
+  }));
+}
+
 const getAllHosts = async ({sort,offset=0,limit=10,filter,search}) => {
   try {
     // `sort` was read straight off req.query and dereferenced — so ANY caller
@@ -98,8 +139,18 @@ const getAllHosts = async ({sort,offset=0,limit=10,filter,search}) => {
       offset: isNaN(offset) ? 0 : parseInt(offset),
       limit: isNaN(limit) ? 10 : parseInt(limit),
     });
+
+    // THE LIST'S KYC COLUMN WAS ALWAYS FALSE. `hosts.kycVerified` is never
+    // written by anything (see getHostById), so every host rendered as
+    // unverified — including hosts whose user holds a verified Aadhaar. The
+    // real state is on the user's documents, so resolve it for this PAGE.
+    //
+    // Resolved in BULK, not per row: three queries for the whole page instead
+    // of three per host. At the default limit that is 3 queries rather than 75.
+    const data = await attachVerificationSummary(rows);
+
     return {
-      data: rows,
+      data,
       totalCount: count
     };
   } catch (error) {
@@ -209,9 +260,46 @@ const createHostPayoutBankAccount = async (hostId, data) => {
   }
 }
 
+// A HOST'S KYC IS THE USER'S KYC. There is no second identity to verify.
+//
+// `hosts` still declares kycNumber / kycRef / kycImage / kycVerified, and
+// NOTHING HAS EVER WRITTEN THEM — no host is created with them, no flow updates
+// them, and the one host on dev has kycVerified=0 and kycNumber=NULL while the
+// user behind it holds a verified Aadhaar, a PAN and a licence. Any screen
+// reading those columns therefore shows "not verified" about somebody who is,
+// and would send an admin to re-collect documents that are already on file.
+//
+// The real documents live in kycDocuments / panCards / drivingLicences, keyed by
+// USER id — which is already the shareable model the platform wants: the same
+// person books rides and lists cars, verifies once, and both roles are covered.
+// This resolves them for the host's user and returns them under `verification`,
+// so the host screens read the same rows the user screens do rather than a
+// parallel copy that can disagree.
+//
+// The legacy columns stay in the response for now (dropping them is a
+// migration), but they are dead — read `verification`, never `host.kyc*`.
 const getHostById = async (id) => {
   try {
-    return await Host.findByPk(id,{include:[{model:User,as:'user'},{model:HostPayoutAccount,as:'hostPayoutAccount'}]});
+    const host = await Host.findByPk(id, {
+      include: [{ model: User, as: 'user' }, { model: HostPayoutAccount, as: 'hostPayoutAccount' }],
+    });
+    if (!host) return null;
+
+    const json = host.toJSON();
+    if (json.userId) {
+      const docs = await documentStore.getAllForUser(json.userId);
+      json.verification = {
+        ...documentStore.projectUserDocuments(docs),
+        // The PROFILE's position in the review workflow, which is what actually
+        // gates booking — distinct from any individual document's status.
+        verificationStatus: json.user?.verificationStatus ?? null,
+        // Says out loud where these came from, so a reader is never left
+        // wondering whether the host has a separate submission somewhere.
+        source: 'user',
+        userId: json.userId,
+      };
+    }
+    return json;
   } catch (error) {
     throw new CustomError(error.message, 400);
   }
