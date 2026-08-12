@@ -37,7 +37,11 @@ const authenticateAdmin = async (req, res, next) => {
   try {
     let idToken = req.headers.authorization;
 
-    console.log('idToken', idToken);
+    // DO NOT LOG THE TOKEN. This printed the full bearer JWT on EVERY admin
+    // request — a live credential, in plaintext, in a log anyone with log
+    // access can read and replay until it expires. It is all over the current
+    // Railway logs for this service. The uid is what makes a log line useful
+    // for attribution, and it is already attached to `req.adminUid` below.
 
     if (!idToken) {
       return res.status(401).json({ error: 'Unauthorized - Missing Authorization Header' });
