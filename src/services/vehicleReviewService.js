@@ -112,19 +112,26 @@ async function getForReview(vehicleId) {
   const hostUser = vehicle.host?.user || null;
   const hostVerificationStatus = hostUser?.verificationStatus || 'unknown';
 
-  // What still stands between this vehicle and Approve.
-  const outstanding = [];
-  if (!rcDoc) outstanding.push('RC (not submitted)');
-  else if (rcDoc.status !== 'verified') outstanding.push(`RC (${rcDoc.status})`);
-  if (!panDoc) outstanding.push('Host PAN (not submitted)');
-  else if (panDoc.status !== 'verified') outstanding.push(`Host PAN (${panDoc.status})`);
-  if (hostVerificationStatus !== 'active') outstanding.push(`Host identity (${hostVerificationStatus})`);
-  if (physicalRequired && !physicalItemsVerified(physicalRow)) {
-    const pending = VehiclePhysicalVerification.ITEMS
-      .filter((item) => (physicalRow?.[`${item}Status`] || 'pending') !== 'verified')
-      .map((item) => `${item} (${physicalRow?.[`${item}Status`] || 'pending'})`);
-    outstanding.push(`Physical checks: ${pending.join(', ')}`);
-  }
+  // WHAT STILL STANDS BETWEEN THIS VEHICLE AND APPROVE — from the SAME source
+  // `approve()` refuses with.
+  //
+  // This used to be a second, hand-written list: RC + host PAN + host identity +
+  // physical checks. When the gate moved to the chain (car photos + RC +
+  // physical visit) this copy was left behind, so the screen and the server
+  // disagreed in both directions at once — it demanded a host PAN the gate no
+  // longer asks for, and never mentioned the car photos the gate now requires.
+  // A reviewer would have seen Approve greyed out with a reason that was not the
+  // real one, and the one real reason absent.
+  //
+  // There is now one list. Whatever verificationSections.js says is outstanding
+  // is what this reports and what a refusal quotes.
+  const chain = await verificationSections.chainState('vehicle', vehicle.id);
+  const outstanding = chain.sections
+    // Same filter approve() applies: the physical visit only counts while its
+    // feature flag is on.
+    .filter((sec) => (sec.key === 'physical' ? physicalRequired : true))
+    .filter((sec) => !sec.satisfied)
+    .map((sec) => `${sec.label} (${sec.status})`);
 
   return {
     ...vehicle.toJSON(),
@@ -140,6 +147,9 @@ async function getForReview(vehicleId) {
       physical: projectPhysical(physicalRow),
       physicalRequired,
       physicalItems: VehiclePhysicalVerification.ITEMS,
+      // The chain itself, so the screen renders one row per section with its own
+      // decision rather than inferring the set from the payload's shape.
+      sections: chain.sections,
       outstanding,
       readyToApprove:
         vehicle.approvalStatus === 'pending'

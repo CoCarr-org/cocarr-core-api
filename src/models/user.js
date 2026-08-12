@@ -178,6 +178,17 @@ const User = db.define('user', {
   kycCheckedByAdminId: {
     type: DataTypes.UUID,
   },
+  // THE NUMBER THE VERIFICATION WAS MADE AGAINST, snapshotted when ops clicked
+  // Verify. "Verified" is a statement about a specific Aadhaar, so which one it
+  // was has to survive the click — otherwise it is a claim with no object.
+  //
+  // It also makes a STALE verification visible: if the user later resubmits a
+  // different Aadhaar, this and the number on the current document row disagree,
+  // and a reviewer would otherwise have no way to notice that what was verified
+  // is no longer what is on file.
+  kycCheckNumber: {
+    type: DataTypes.STRING,
+  },
   photoMatchStatus: {
     type: DataTypes.ENUM('pending', 'verified', 'rejected'),
     allowNull: false,
