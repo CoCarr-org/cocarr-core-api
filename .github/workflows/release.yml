@@ -1,4 +1,5 @@
-# RELEASE — migrate, THEN deploy. The order is the whole point.
+# RELEASE — migrate, THEN deploy. The order is still the whole point; what
+# changed is WHERE the migration runs.
 #
 # A deploy that ships code before its schema runs new code against an old
 # database: it looks healthy and writes to columns that may not exist. A deploy
@@ -6,10 +7,34 @@
 # container serving — which is the correct outcome, because a working old
 # version beats a broken new one.
 #
-# This also fixes the replica race. Migrations run ONCE in this job, not in
-# every booting container. Two replicas starting together would otherwise issue
-# the same DDL concurrently, and MySQL DDL is not transactional — you get a
-# half-applied change with no way to tell which one won.
+# THIS JOB USED TO RUN THE MIGRATION ITSELF, AND COULD NOT HAVE.
+#
+# It called `npm run migrate:up` on the GitHub runner using DB_HOST from
+# secrets. That host is `mysql.railway.internal`, and Railway's private network
+# is not reachable from outside Railway — the MySQL service exposes no TCP proxy
+# (no RAILWAY_TCP_PROXY_* variables on it), so there is no public address to
+# reach it on at all. Every DB step here could only ever fail with
+# `getaddrinfo ENOTFOUND mysql.railway.internal`, before touching the database.
+#
+# Which means the guarantee in the header was never held: the deploy step below
+# was gated on a migration that had not run. Worse, it fails in the direction
+# that LOOKS safe — the job goes red, so nobody sees a bad deploy; they see a
+# broken pipeline, and the schema quietly stays behind.
+#
+# So the migration moved to `railway.json`'s `preDeployCommand`, which Railway
+# runs INSIDE the private network, once per deploy, before the new revision
+# takes traffic. Identical semantics, from somewhere that can actually connect:
+#
+#   - fails the deploy if the migration fails, old container keeps serving
+#   - runs ONCE per deploy, not per replica, so no concurrent DDL
+#   - runs against the environment being deployed to, not one named by a secret
+#     that can silently point somewhere else
+#
+# The replica race is still handled, and now more directly: preDeploy is a
+# single execution by definition, whereas this job relied on `concurrency` to
+# stop two runs overlapping.
+#
+# WHAT STILL BELONGS HERE: the environment approval gate, and the deploy.
 name: Release
 
 on:
@@ -26,8 +51,9 @@ on:
         options: [staging, production]
 
 concurrency:
-  # Never two releases to the same environment at once. Without this, two merges
-  # a minute apart can interleave migrations.
+  # Never two releases to the same environment at once. Still wanted: two
+  # overlapping deploys race each other's preDeploy migrations just as two
+  # overlapping migrate jobs used to.
   group: release-${{ github.event.inputs.environment || (github.event_name == 'release' && 'production' || 'staging') }}
   cancel-in-progress: false
 
@@ -40,46 +66,31 @@ jobs:
       # "whatever merged last".
       name: ${{ github.event.inputs.environment || (github.event_name == 'release' && 'production' || 'staging') }}
     env:
-      DB_HOST: ${{ secrets.DB_HOST }}
-      DB_PORT: ${{ secrets.DB_PORT }}
-      DB_NAME: ${{ secrets.DB_NAME }}
-      DB_USER: ${{ secrets.DB_USER }}
-      DB_PASS: ${{ secrets.DB_PASS }}
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-      - run: npm ci --omit=dev --no-audit --no-fund
 
-      # 1. SAY WHAT WILL HAPPEN before it happens. This shows up in the run log,
-      #    so a surprising migration is visible in review rather than after.
-      - name: Migration plan
-        run: npm run migrate:status
-
-      # 2. BACK UP FIRST. A migration is the one deploy step that cannot be
-      #    rolled back by redeploying the previous image.
+      # A migration is the one deploy step that cannot be undone by redeploying
+      # the previous image. The reminder stays, and stays before the deploy that
+      # triggers the migration rather than before a step that never ran.
       - name: Backup reminder
         if: ${{ github.event_name == 'release' }}
         run: |
-          echo "::warning::Production migration — confirm a database snapshot exists before this run."
+          echo "::warning::Production deploy — this runs pending migrations via preDeployCommand. Confirm a database snapshot exists."
 
-      # 3. MIGRATE. Failure fails the job, and the deploy step below never runs.
-      - name: Apply migrations
-        run: npm run migrate:up
-
-      # 4. Only now does new code take traffic.
+      # Railway runs `npm run migrate:up` (railway.json → deploy.preDeployCommand)
+      # before this revision receives traffic. A failing migration fails the
+      # deploy and the previous container keeps serving.
       - name: Deploy
         run: |
           if [ -z "$RAILWAY_TOKEN" ]; then
-            echo "::error::RAILWAY_TOKEN not set — migrations ran but nothing deployed."
+            echo "::error::RAILWAY_TOKEN not set — nothing deployed."
             exit 1
           fi
           npm i -g @railway/cli
           railway redeploy --service core --yes --from-source
 
-      # 5. Prove the released revision agrees with the schema it is running on.
-      - name: Verify no pending migrations
-        run: npm run migrate:check
+      # Verifying the schema from here would need database access this runner
+      # does not have. The equivalent check now lives in the service itself:
+      # boot logs "!!! PENDING MIGRATIONS !!!" if the revision is running
+      # against an older schema, and GET /v1/health reports db reachability.

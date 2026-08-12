@@ -6,6 +6,7 @@
   },
   "deploy": {
     "startCommand": "node index.js",
+    "preDeployCommand": "npm run migrate:up",
     "numReplicas": 1,
     "healthcheckPath": "/v1/health",
     "restartPolicyType": "ON_FAILURE",
