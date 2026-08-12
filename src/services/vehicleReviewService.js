@@ -9,6 +9,7 @@ const City = require('../models/city');
 const Schedule = require('../models/schedule');
 const VehiclePhysicalVerification = require('../models/vehiclePhysicalVerification');
 const FeatureFlag = require('../models/featureFlag');
+const verificationSections = require('./verificationSections');
 const documentStore = require('./documentStoreService');
 const { logActivity } = require('./activityLogService');
 const { toPublicUrl, extractKey } = require('../utils/publicUrl');
@@ -262,20 +263,43 @@ async function approve(vehicleId, admin) {
     throw badRequest(`Only a vehicle awaiting review can be approved — this one is ${vehicle.approvalStatus}`);
   }
 
-  const hostUserId = hostUserIdOf(vehicle);
-  const [rcDoc, panDoc, physicalRow, physicalRequired] = await Promise.all([
-    documentStore.getCurrent('rc', vehicle.id),
-    hostUserId ? documentStore.getCurrent('pan', hostUserId) : Promise.resolve(null),
-    getPhysicalRow(vehicle.id),
-    isPhysicalVerificationEnabled(),
-  ]);
-
-  const outstanding = [];
-  if (rcDoc?.status !== 'verified') outstanding.push(`RC (${rcDoc?.status || 'not submitted'})`);
-  if (panDoc?.status !== 'verified') outstanding.push(`Host PAN (${panDoc?.status || 'not submitted'})`);
-  const hostStatus = vehicle.host?.user?.verificationStatus || 'unknown';
-  if (hostStatus !== 'active') outstanding.push(`Host identity (${hostStatus})`);
-  if (physicalRequired && !physicalItemsVerified(physicalRow)) outstanding.push('Physical verification incomplete');
+  // ── THE CAR CHAIN, AND ONLY THE CAR CHAIN ────────────────────────────────
+  //
+  // Car photos + RC + the physical visit. Defined in verificationSections.js so
+  // this gate and the ops screen quote the same list.
+  //
+  // TWO THINGS DELIBERATELY LEFT OUT, both of which used to be here:
+  //
+  //   the host's PAN        — moved to the HOST chain. PAN is a tax requirement
+  //                           for PAYING somebody; it says nothing about whether
+  //                           a car is safe to rent. Blocking a listing on it
+  //                           held up the car and did not speed up the payout.
+  //   the host's RIDER
+  //   approval              — a car waited on `user.verificationStatus === 'active'`,
+  //                           which is the approval of that person as a RIDER:
+  //                           their driving licence, their Aadhaar as a
+  //                           passenger-facing identity. Someone who only wants
+  //                           to list a car was blocked behind a review of their
+  //                           ability to drive one.
+  //
+  // The person is still checked — in the physical visit, which has a `host` item
+  // and photographs of them beside the car. That is a stronger check for this
+  // purpose than a rider approval, because somebody actually went and looked.
+  //
+  // Note this makes the three chains genuinely independent, which is the point:
+  // a car can go live for a host whose PAN is still outstanding. They will not be
+  // PAID until the host chain completes — that gate is in hostVerificationService
+  // — so the exposure is a car earning into a pending payout, not an unchecked
+  // car on the road.
+  const physicalRequired = await isPhysicalVerificationEnabled();
+  const chain = await verificationSections.chainState('vehicle', vehicle.id);
+  const outstanding = chain.sections
+    // The physical visit is skipped entirely when its feature flag is off —
+    // that flag's whole purpose is to let approval be document-only until the
+    // in-person process is actually running.
+    .filter((sec) => (sec.key === 'physical' ? physicalRequired : true))
+    .filter((sec) => !sec.satisfied)
+    .map((sec) => `${sec.label} (${sec.status})`);
 
   if (outstanding.length) {
     throw badRequest(`Verify every check before approving. Outstanding: ${outstanding.join(', ')}`);

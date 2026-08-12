@@ -200,6 +200,48 @@ router.post('/user-verification/:id/ocr/:kind', authenticateAdmin, requirePermis
 router.post('/user-verification/:id/document/:docType', authenticateAdmin, requirePermission('users','update'),
   verify((req) => docs.setUserDocumentStatus(req.params.id, req.params.docType, req.body.verified, req.admin, req.body.reason)));
 
+// ── Verification sections: one vocabulary for all three chains ─────────────
+//
+// `POST .../section/:section` with `{ decision, reason }` where decision is
+// verified | unverified | rejected. See services/verificationSections.js.
+//
+// This SUPERSEDES the boolean `/document/:docType` route above, which is left in
+// place because the current ops UI still calls it. That one cannot express an
+// unverify: it maps `verified: false` onto a REJECTION carrying the filler reason
+// "Verification withdrawn by admin", so an admin undoing a mis-click sends the
+// user a rejection they then have to act on. Point new UI at this route and
+// retire that one once nothing calls it.
+const sections = require('../services/verificationSections');
+const hostVerification = require('../services/hostVerificationService');
+
+router.get('/user-verification/:id/sections', authenticateAdmin, requirePermission('users','read'),
+  verify((req) => sections.chainState('user', req.params.id)));
+router.post('/user-verification/:id/section/:section', authenticateAdmin, requirePermission('users','update'),
+  verify((req) => sections.applyDecision('user', req.params.id, req.params.section, req.body.decision, req.admin, req.body.reason)));
+
+// ── Host verification (its own chain: PAN + bank + KYC) ────────────────────
+//
+// Gated on `payouts` rather than `users`: this decides whether somebody can be
+// PAID, which is a finance judgement, and the team that reviews a driving licence
+// is not necessarily the team that should be clearing a bank account.
+router.get('/host-verification/:id', authenticateAdmin, requirePermission('payouts','read'),
+  verify((req) => hostVerification.getReviewState(req.params.id)));
+router.post('/host-verification/:id/section/:section', authenticateAdmin, requirePermission('payouts','update'),
+  verify((req) => hostVerification.reviewSection(req.params.id, req.params.section, req.body.decision, req.admin, req.body.reason)));
+router.post('/host-verification/:id/decision', authenticateAdmin, requirePermission('payouts','update'),
+  verify((req) => hostVerification.setVerification(req.params.id, req.body.decision, req.admin, req.body.reason)));
+
+// ── Vehicle verification sections (photos + RC + physical visit) ───────────
+//
+// The physical visit is deliberately NOT settleable through this route — it is
+// recorded item by item with photographs on the existing physical-check
+// endpoint, because a single "visit verified" button would let somebody tick off
+// a site visit they never made.
+router.get('/vehicle-verification/:id/sections', authenticateAdmin, requirePermission('vehicles','read'),
+  verify((req) => sections.chainState('vehicle', req.params.id)));
+router.post('/vehicle-verification/:id/section/:section', authenticateAdmin, requirePermission('vehicles','update'),
+  verify((req) => sections.applyDecision('vehicle', req.params.id, req.params.section, req.body.decision, req.admin, req.body.reason)));
+
 // ── Policies (read-only review catalogue) ──
 // Descriptive, not a config store: it reports where each rule actually lives
 // and flags the ones that are inconsistent or unenforced.

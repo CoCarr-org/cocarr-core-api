@@ -96,9 +96,22 @@ async function update(type, document, data) {
 }
 
 // Admin decision. Rejection requires a reason so the owner knows what to fix.
+//
+// `pending` IS A DECISION AN ADMIN CAN MAKE, and it is not a rejection.
+//
+// It is an UNVERIFY: putting a document back in the queue after verifying it by
+// mistake. Only `verified` and `rejected` were accepted before, so the admin UI
+// expressed "not verified" as a rejection carrying the filler reason
+// "Verification withdrawn by admin" — which sent the owner a rejection, with a
+// meaningless explanation, for something nobody had actually decided against.
+//
+// The three are genuinely different and the owner experiences them differently:
+//   verified  — done.
+//   pending   — nothing has been decided; the owner is told nothing.
+//   rejected  — decided against, with a reason the owner must act on.
 async function review(type, documentId, { status, reason }, admin) {
   const { model } = resolve(type);
-  if (!['verified', 'rejected'].includes(status)) {
+  if (!['verified', 'rejected', 'pending'].includes(status)) {
     throw badRequest(`Invalid review status: ${status}`);
   }
   const text = String(reason || '').trim();

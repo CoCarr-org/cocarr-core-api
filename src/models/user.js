@@ -143,6 +143,56 @@ const User = db.define('user', {
     defaultValue: false,
   },
 
+  // ── The two checks an admin makes that are NOT about a single document ────
+  //
+  // The document rows answer "is this scan real, legible and matching the
+  // profile?". These two answer questions no individual document can:
+  //
+  // kycCheck    — is this person's IDENTITY established? Normally the Aadhaar
+  //               OTP proves it, but the OTP cannot always run (a provider
+  //               outage, or verification.providerBypass on in a development
+  //               environment) — and when it does not, nothing recorded whether
+  //               ops had satisfied themselves some other way. This is that
+  //               record, and it is why the KYC section can read "verified"
+  //               even on a bypassed run.
+  //
+  // photoMatch  — is the person in the live selfie the same person as the photo
+  //               printed on the Aadhaar and the licence? Every document can be
+  //               genuine and still belong to somebody else; this is the only
+  //               check that looks at the three faces together, and it is the
+  //               one an admin does with their eyes.
+  //
+  // Both are tri-state and both are UNVERIFIABLE — see verificationSections.js
+  // for why `pending` has to be reachable again after `verified`.
+  kycCheckStatus: {
+    type: DataTypes.ENUM('pending', 'verified', 'rejected'),
+    allowNull: false,
+    defaultValue: 'pending',
+  },
+  kycCheckReason: {
+    type: DataTypes.TEXT,
+  },
+  kycCheckedAt: {
+    type: DataTypes.DATE,
+  },
+  kycCheckedByAdminId: {
+    type: DataTypes.UUID,
+  },
+  photoMatchStatus: {
+    type: DataTypes.ENUM('pending', 'verified', 'rejected'),
+    allowNull: false,
+    defaultValue: 'pending',
+  },
+  photoMatchReason: {
+    type: DataTypes.TEXT,
+  },
+  photoMatchedAt: {
+    type: DataTypes.DATE,
+  },
+  photoMatchedByAdminId: {
+    type: DataTypes.UUID,
+  },
+
   // Outcome of comparing profile name / licence name / Aadhaar name. Stored so
   // a reviewer can see WHY a submission was auto-flagged.
   nameMatchResult: {
