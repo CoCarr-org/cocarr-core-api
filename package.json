@@ -25,7 +25,7 @@
     "axios": "^1.19.0",
     "body-parser": "^1.20.6",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^4.22.2",
     "express-validator": "^7.0.1",
