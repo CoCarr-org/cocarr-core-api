@@ -211,6 +211,10 @@ async function initialize() {
     // Seeds the (default-off) vehicle physical-verification feature flag so it
     // is visible and toggleable in the Feature Flags screen from day one.
     await runStep('Vehicle feature flags', require('./src/services/vehicleReviewService.js').ensureDefaultFlag);
+    // Seeds the KYC/OCR provider bypass flag, DEFAULT OFF, so it is visible and
+    // switchable in the Feature Flags screen without anybody having to know the
+    // key. findOrCreate — a redeploy never changes a flag an admin has set.
+    await runStep('Verification bypass flag', require('./src/utils/verificationBypass.js').ensureBypassFlag);
   }
   await runStep('Payout scheduler', async () => initializePayoutScheduler());
   // Weekly host settlement. Gated behind SETTLEMENT_CRON_ENABLED so deploying

@@ -1,4 +1,5 @@
 const FormData = require('form-data');
+const { isProviderBypassEnabled, logBypass } = require('../utils/verificationBypass');
 const { kycHttp } = require('../utils/kycHttp');
 const { getSignature } = require('../utils/signature');
 
@@ -178,6 +179,29 @@ async function runOcr(kind, fileBuffer, mimeType) {
   }
 
   const id = verificationId();
+
+  // ── Development bypass ─────────────────────────────────────────────────────
+  //
+  // Answered locally instead of calling Cashfree. The IMAGE HAS ALREADY BEEN
+  // REQUIRED above and is stored by the caller either way — the bypass skips the
+  // reading, never the upload, so every row downstream has the same shape it
+  // would have had.
+  //
+  // `status: 'VALID'` with no extracted fields is deliberate. It keeps the flow
+  // moving (the wizard does not drop into its OCR-failure fallback) while
+  // `ocrFields` stays empty, so nothing invents a name or a number that no
+  // provider ever read. A reviewer looking at this row sees a clean scan with
+  // nothing extracted from it, which is exactly what happened.
+  if (await isProviderBypassEnabled()) {
+    logBypass(`${kind} OCR`, null);
+    return {
+      status: 'VALID',
+      fields: {},
+      raw: { bypassed: true, reason: 'verification.providerBypass', documentKind: kind },
+      verificationId: id,
+      message: 'Development bypass — this document was not read by the provider.',
+    };
+  }
 
   if (!isConfigured()) {
     // Not an error the user can act on — do not make it look like one.

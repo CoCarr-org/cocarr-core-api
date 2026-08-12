@@ -8,6 +8,12 @@ const Brand = require('../models/brand');
 const userAuth = require('../helper/userAuth');
 const { default: axios } = require('axios');
 const documentStore = require('./documentStoreService');
+const { isProviderBypassEnabled, logBypass } = require('../utils/verificationBypass');
+
+// The reference a bypassed OTP handshake carries. Deliberately not a plausible
+// provider ref: it has to be impossible to confuse with a real one, both when
+// reading a row later and when deciding whether to honour it.
+const BYPASS_REF = 'BYPASSED-NO-PROVIDER-CALL';
 const KycDocumentModel = require('../models/kycDocument');
 const licenceVerification = require('./licenceVerificationService');
 const Booking = require('../models/booking');
@@ -337,6 +343,22 @@ async function checkKycNumber(data, userId) {
       if (userId) clash.userId = { [Op.ne]: userId };
       const existingDoc = await KycDocumentModel.findOne({ where: clash });
       if(existingDoc) throw new CustomError('Aadhar already linked with another account',400,'AADHAR_ALREADY_LINKED')
+
+      // ── Development bypass ────────────────────────────────────────────────
+      //
+      // Skips the OTP REQUEST only. Everything above it still runs, and that
+      // matters: the uniqueness check is what stops one Aadhaar being attached
+      // to two accounts, and it is a rule of ours, not the provider's. A bypass
+      // that skipped it would let a test environment build data that could never
+      // exist in production, which is the opposite of useful.
+      //
+      // The returned ref is marked so verifyKycNumber can tell a bypassed
+      // handshake from a real one and refuse to mix them.
+      if (await isProviderBypassEnabled()) {
+        logBypass('Aadhaar OTP request', userId);
+        return { kycRef: BYPASS_REF, bypassed: true };
+      }
+
       let res  =  await axios.post(`${process.env.KYC_URL}/verification/offline-aadhaar/otp`,{aadhaar_number:data.kycNumber},{headers:{'x-client-id':`${process.env.KYC_ID}`,'x-client-secret':`${process.env.KYC_SECRET}`}})
       return {kycRef:res.data.ref_id}
     } catch (error) {
@@ -351,8 +373,34 @@ async function verifyKycNumber(data,userId) {
       // Same fallback as checkKycNumber — the OTP proves whichever number the
       // confirm step settled on, and the client is not required to still hold it.
       data = { ...data, kycNumber: await resolveKycNumber(data, userId) };
-      let res  =  await axios.post(`${process.env.KYC_URL}/verification/offline-aadhaar/verify`,{ref_id:data.ref,otp:data.otp},{headers:{'x-client-id':`${process.env.KYC_ID}`,'x-client-secret':`${process.env.KYC_SECRET}`}})
-      if(res.data.status !== 'VALID') throw(res.data.status)
+
+      // ── Development bypass ────────────────────────────────────────────────
+      //
+      // Stands in for the provider's verdict. It is gated on the flag AND on the
+      // ref this service itself issued: a real ref is never BYPASS_REF, so a
+      // caller cannot hand us a made-up reference and be verified, and a
+      // bypassed ref cannot be redeemed once the flag is switched back off.
+      //
+      // `providerStatus` is recorded as BYPASSED rather than VALID. The row must
+      // never claim Cashfree said something it was never asked — the whole
+      // difference between a verification and a bypass is legible only if the
+      // row says which one it was.
+      const bypassing = data.ref === BYPASS_REF && await isProviderBypassEnabled();
+      if (data.ref === BYPASS_REF && !bypassing) {
+        throw new CustomError(
+          'This verification was started while the development bypass was on, and it is now off. Start the KYC check again.',
+          400, 'BYPASS_DISABLED',
+        );
+      }
+
+      let res;
+      if (bypassing) {
+        logBypass('Aadhaar OTP verification', userId);
+        res = { data: { status: 'BYPASSED', name: null } };
+      } else {
+        res = await axios.post(`${process.env.KYC_URL}/verification/offline-aadhaar/verify`,{ref_id:data.ref,otp:data.otp},{headers:{'x-client-id':`${process.env.KYC_ID}`,'x-client-secret':`${process.env.KYC_SECRET}`}})
+        if(res.data.status !== 'VALID') throw(res.data.status)
+      }
 
       // The verified Aadhaar becomes the user's current KYC document. The
       // provider's name is captured here because it is what the KYC matching
