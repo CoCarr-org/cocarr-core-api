@@ -36,11 +36,57 @@ const { kycHttp } = require('../utils/kycHttp');
 const { getSignature } = require("../utils/signature");
 const { personName } = require('../utils/userDisplayName');
 
+// THE ONE PLACE THAT RESOLVES A USER TO THEIR HOST ROW.
+//
+// `host.userId` has no unique constraint (it is commented out on the model), so
+// a user CAN have more than one host row — and several already do. Every lookup
+// was a bare `Host.findOne({ where: { userId } })` with no ordering, which MySQL
+// is free to answer with either row, and different calls could get different
+// answers.
+//
+// That is how a car goes missing: the publish attaches it to whichever row it
+// resolved, the dashboard reads whichever row IT resolved, and if those differ
+// the car exists, belongs to the user, and is invisible. Reproduced: a car on
+// the second host row shows as `count 0` on the dashboard.
+//
+// Oldest wins — arbitrary, but the point is that it is the SAME arbitrary answer
+// every time. The real fix is one host row per user, which createHost now
+// enforces going forward and scripts/findDuplicateHosts.js repairs behind.
+const resolveHost = async (userId, options = {}) => Host.findOne({
+  where: { userId },
+  order: [['createdAt', 'ASC']],
+  ...options,
+});
+
+// Every host row a user has. Reads that must not lose data — their cars, their
+// bookings — go through this rather than picking one row, so an account that
+// already has duplicates is not silently missing half of itself.
+const allHostIdsFor = async (userId) => {
+  const rows = await Host.findAll({ where: { userId }, attributes: ['id'], order: [['createdAt', 'ASC']] });
+  return rows.map((r) => r.id);
+};
+
 const createHost = async (hostData) => {
   const transaction = await db.transaction();
   try {
     const userInfo = await User.findOne({ where: { id: hostData.userId } });
     if (!userInfo) throw new CustomError('User not found', 404);
+
+    // IDEMPOTENT. Becoming a host twice is not an error and must not create a
+    // second row — it created one silently, along with a second 30% commission
+    // record, and split the user's cars across two identities.
+    //
+    // The database cannot enforce this yet: adding `unique: true` to the model
+    // makes db.sync({alter:true}) try to build the index on boot, and with
+    // duplicates already present that alter FAILS — which in this codebase
+    // aborts the whole sync pass and silently leaves every model after it
+    // without its table. Clean the data with scripts/findDuplicateHosts.js
+    // first, then the constraint is safe to add.
+    const existing = await resolveHost(hostData.userId, { transaction });
+    if (existing) {
+      await transaction.commit();
+      return existing;
+    }
     
     // `userInfo.name` ALONE IS NULL FOR ALMOST EVERY USER. It is only populated
     // for accounts that arrived with a Firebase displayName; the OTP signup flow
@@ -1539,11 +1585,24 @@ const updateVehicle = async ({ type, vehicleId, userId, data }) => {
 
 const getMyVehicles = async (hostId) => {
   try {
-    const host = await Host.findOne({ where: { userId: hostId } });
-    const totalVehicles = await Vehicle.count({ where: { hostId: host.id } });
+    // ACROSS EVERY HOST ROW THIS USER HAS, not just one of them.
+    //
+    // `host.userId` is not unique, so a user can own cars under more than one
+    // host row. Reading only the row `findOne` happened to return made the rest
+    // invisible — the host added a car and it simply was not there, with the
+    // count agreeing that they had none. Reproduced before this change.
+    //
+    // createHost no longer creates a second row and
+    // scripts/findDuplicateHosts.js merges the existing ones, but this must not
+    // depend on that having been run: a host looking for their car today should
+    // see it today.
+    const hostIds = await allHostIdsFor(hostId);
+    if (!hostIds.length) throw new CustomError('Complete host onboarding before adding a car', 400);
+
+    const totalVehicles = await Vehicle.count({ where: { hostId: hostIds } });
 
     let vehicles = await Vehicle.findAll({
-      where: { hostId: host.id },
+      where: { hostId: hostIds },
       include: [
         {
           model: Image,
@@ -1582,7 +1641,10 @@ const getMyVehicles = async (hostId) => {
 
 const getMyVehicleById = async ({ userId, vehicleId }) => {
   try {
-    const host = await Host.findOne({ where: { userId: userId } });
+    // Same reason as getMyVehicles: opening a car by id must not 404 because it
+    // is attached to the user's other host row.
+    const hostIds = await allHostIdsFor(userId);
+    const host = { id: hostIds };
 
     let vehicle = await Vehicle.findOne({
       where: { hostId: host.id, id: vehicleId },
