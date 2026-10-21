@@ -13,6 +13,10 @@ const db = require('../configs/db');
 const moment = require('moment');
 const RazorpayInstance = require('../helper/payment');
 
+// Launch offer: the number of a host's earliest bookings that carry no platform
+// commission. Shown to hosts on the offers card; keep the two in step.
+const HOST_COMMISSION_FREE_BOOKINGS = 10;
+
 /**
  * Calculate host payout for a single booking with all transactions
  * Commission logic:
@@ -92,8 +96,23 @@ const calculateBookingPayout = async (bookingId) => {
     // Commissionable amount excludes fees
     const commissionableAmount = totalGrossAmount - (convenienceFee + deliveryFee + protectionPlanFee);
 
-    // Calculate commission
-    const commissionPercentage = parseFloat(hostCommission.commissionPercentage);
+    // Calculate commission.
+    // Launch offer: a host's first HOST_COMMISSION_FREE_BOOKINGS bookings are
+    // commission free. Eligibility is counted from the host's own payout ledger
+    // rows (one per booking, written 48h after a ride ends), excluding this
+    // booking so a re-run of the same payout cannot shift the host past the
+    // threshold. The stored commission row is left untouched — the waiver is a
+    // property of the booking, not a change to the host's rate.
+    const settledBookingCount = await HostPayoutLedger.count({
+      where: {
+        hostId: booking.hostId,
+        bookingId: { [Op.ne]: bookingId }
+      }
+    });
+    const commissionWaived = settledBookingCount < HOST_COMMISSION_FREE_BOOKINGS;
+    const commissionPercentage = commissionWaived
+      ? 0
+      : parseFloat(hostCommission.commissionPercentage);
     const commissionAmount = Math.round(commissionableAmount * (commissionPercentage / 100));
 
     // Host net amount after commission
@@ -119,6 +138,7 @@ const calculateBookingPayout = async (bookingId) => {
       commissionPercentage,
       commissionableAmount,
       commissionAmount,
+      commissionWaived,
       hostNetAmount,
       gstPercentage,
       gstAmount,
